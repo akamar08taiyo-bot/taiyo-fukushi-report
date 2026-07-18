@@ -1,0 +1,4 @@
+build/node_modules/
+build/tailwind.output.css
+_test.pdf
+*.log

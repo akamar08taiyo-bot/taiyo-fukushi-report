@@ -1,0 +1,1891 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>福祉用具相談報告書 作成 - 太陽シルバーサービス</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  /* 印刷: holder のみを出力する（DOM注入方式） */
+  #print-content-holder { display: none; }
+  @media print {
+    @page { size: A4 portrait; margin: 0; }
+    /* display:none方式: アプリ本体を印刷レイアウトから完全除外し（空白ページ防止）、
+       プレビュー表示用のinlineスタイルにも !important で勝つ */
+    body > *:not(#print-content-holder) { display: none !important; }
+    #print-content-holder {
+      display: block !important;
+      position: static !important;
+      margin: 0 !important;
+      width: 210mm !important;
+      max-width: none !important;
+      z-index: auto !important;
+    }
+    .no-print { display: none !important; }
+  }
+</style>
+</head>
+<body class="bg-slate-100">
+<div id="root">
+  <div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#475569;flex-direction:column;gap:8px;">
+    <div style="font-size:18px;font-weight:bold;">福祉用具相談報告書アプリ</div>
+    <div style="font-size:13px;">読み込み中… 初回は10〜20秒、2回目以降は数秒です</div>
+  </div>
+</div>
+<div id="print-content-holder"></div>
+<script type="text/babel">
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import ReactDOM from 'react-dom/client';
+import {
+  ArrowLeft, Camera, ImagePlus, FileText, Printer, Save, Settings, Trash2,
+  Plus, X, Sparkles, Download, Upload, FileUp, Loader2, ClipboardList,
+  FileDown, Copy, CheckCircle2, AlertTriangle, FolderOpen, Wand2
+} from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
+import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker';
+import Anthropic from '@anthropic-ai/sdk';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+
+// pdf.js: worker を同一バンドルに同梱し fake worker で動かす（外部ファイル・CDN不要）
+if (typeof window !== 'undefined') window.pdfjsWorker = pdfjsWorker;
+
+// ===== ストレージキー =====
+const STORAGE_KEYS = {
+  REPORTS: 'taiyo_fukushi_reports_v1',
+  DRAFTS: 'taiyo_fukushi_drafts_v1', // 報告書ID別の下書きマップ {id: report}
+  MASTER: 'taiyo_fukushi_master_v1',
+  SETTINGS: 'taiyo_fukushi_settings_v1',
+};
+
+// ===== 営業所マスタ（太陽シルバーサービス㈱ 全営業所） =====
+const OFFICE_MASTER = [
+  { name: '小倉営業所',   postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',  phone: '093-952-1616', fax: '093-952-1627', manager: '森口 賢一' },
+  { name: '小倉南営業所', postal: '800-0226', address: '福岡県北九州市小倉南区田原新町1-3-34',  phone: '093-474-5670', fax: '093-474-5671', manager: '串山 清彦' },
+  { name: '八幡西営業所', postal: '807-0815', address: '福岡県北九州市八幡西区本城東2-4-8',    phone: '093-603-3512', fax: '093-601-3593', manager: '福本 浩史' },
+  { name: '八幡東営業所', postal: '805-0033', address: '福岡県北九州市八幡東区山路松尾町14-6', phone: '093-654-8515', fax: '093-654-8516', manager: '兼重 陽介' },
+  { name: '行橋営業所',   postal: '824-0043', address: '福岡県行橋市大字流末1327番地',         phone: '0930-26-9640', fax: '0930-26-9641', manager: '久保 匠史' },
+  { name: '田川営業所',   postal: '826-0042', address: '福岡県田川市大字川宮1200番地',         phone: '0947-44-1895', fax: '0947-44-2372', manager: '早崎 勝' },
+  { name: '飯塚営業所',   postal: '820-0081', address: '福岡県飯塚市枝国510番地7',             phone: '0948-52-6360', fax: '0948-52-6362', manager: '佐藤 正仁' },
+  { name: '福岡南営業所', postal: '816-0912', address: '福岡県大野城市御笠川2-10-15',          phone: '092-504-9810', fax: '092-504-9811', manager: '神谷 大輔' },
+  { name: '福岡西営業所', postal: '814-0032', address: '福岡県福岡市早良区小田部4-11-31',      phone: '092-833-0131', fax: '092-833-0132', manager: '佐藤 正利' },
+  { name: '福岡東営業所', postal: '812-0064', address: '福岡県福岡市東区松田3丁目25-2',        phone: '092-627-1150', fax: '092-627-1151', manager: '岡本 将臣' },
+  { name: '久留米営業所', postal: '838-0814', address: '福岡県朝倉郡筑前町高田585-1',          phone: '0946-21-5355', fax: '0946-21-5356', manager: '牟田 知広' },
+  { name: '大牟田営業所', postal: '837-0924', address: '福岡県大牟田市歴木446-1',              phone: '0944-59-1488', fax: '0944-59-1481', manager: '橋本 浩志' },
+  { name: '佐賀営業所',   postal: '849-0937', address: '佐賀県佐賀市鍋島5丁目4-15',            phone: '0952-34-1224', fax: '0952-34-1225', manager: '江原 諒' },
+  { name: '長崎営業所',   postal: '851-0122', address: '長崎県長崎市界2丁目2-4',               phone: '095-834-0535', fax: '095-834-0536', manager: '吉本 幸治' },
+  { name: '大村営業所',   postal: '856-0844', address: '長崎県大村市溝陸町643-1',              phone: '0957-49-6222', fax: '0957-49-6333', manager: '山口 隆史' },
+  { name: '壱岐営業所',   postal: '811-5117', address: '長崎県壱岐市郷ノ浦町中触1078',         phone: '0920-47-9005', fax: '0920-47-9006', manager: '長岡 計治' },
+  { name: '熊本営業所',   postal: '862-0945', address: '熊本県熊本市東区画図町大字下無田1432-22', phone: '096-377-7630', fax: '096-377-7631', manager: '城戸 健' },
+  { name: '熊本北営業所', postal: '861-5517', address: '熊本県熊本市北区鶴羽田1-10-7',         phone: '096-341-5765', fax: '096-341-5766', manager: '高木 伸基' },
+  { name: '大分営業所',   postal: '870-0142', address: '大分県大分市三川下2-7-8',              phone: '097-555-9684', fax: '097-555-9685', manager: '山下 厚' },
+];
+
+const COMPANY_NAME = '太陽シルバーサービス株式会社';
+
+// ===== 福祉用具ドメインマスタ =====
+const PLACES = ['屋外', '玄関', '廊下', 'トイレ', '寝室', '居間', '浴室', '勝手口', 'その他'];
+
+const RENTAL_ITEMS = [
+  '車いす', '車いす付属品', '特殊寝台', '特殊寝台付属品', '床ずれ防止用具',
+  '体位変換器', '手すり', 'スロープ', '歩行器', '歩行補助つえ',
+  '認知症老人徘徊感知機器', '移動用リフト（つり具の部分を除く）', '自動排泄処理装置',
+];
+const SPECIFIC_ITEMS = [
+  '腰掛便座', '自動排泄処理装置の交換可能部品', '入浴補助用具', '簡易浴槽',
+  '移動用リフトのつり具の部分', '排泄予測支援機器',
+];
+// 2024年度制度改正: 貸与・販売の選択制対象品目（販売を選んだ場合に使用）
+const SELECTABLE_ITEMS = [
+  '固定用スロープ', '歩行器（歩行車を除く）', '単点杖（松葉づえを除く）・多点杖',
+];
+const CATEGORY_RENTAL = '福祉用具貸与';
+const CATEGORY_SPECIFIC = '特定福祉用具';
+const CATEGORIES = [CATEGORY_RENTAL, CATEGORY_SPECIFIC];
+
+const REPORT_TYPES = ['納品', 'モニタリング', '入替・変更', '引き取り', '相談', 'デモ機貸出'];
+
+// 報告事項の定型文（タップで挿入）
+const TEMPLATE_PHRASES = [
+  '本日、上記福祉用具を納品いたしました。設置場所・高さを調整し、動作確認を行いました。',
+  'ご本人・ご家族へ使用方法および注意事項を説明し、ご理解いただきました。',
+  '身体状況に適合していることを確認いたしました。今後も定期的にモニタリングを実施いたします。',
+  '使用状況を確認いたしました。特に不具合なく、安全にご使用いただいております。',
+  '福祉用具の状態を点検し、消耗・不具合がないことを確認いたしました。',
+  'ご不明な点がございましたら、下記担当までお気軽にお問い合わせください。',
+];
+
+// ===== ユーティリティ =====
+const genId = (prefix = 'id') =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+const loadStorage = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+};
+
+// 同一値書込みをスキップ（localStorage は同期I/Oで重い）
+const saveStorageCache = {};
+const saveStorage = (key, data) => {
+  try {
+    const serialized = JSON.stringify(data);
+    if (saveStorageCache[key] === serialized) return true;
+    saveStorageCache[key] = serialized;
+    localStorage.setItem(key, serialized);
+    return true;
+  } catch { return false; }
+};
+const removeStorage = (key) => { try { delete saveStorageCache[key]; localStorage.removeItem(key); } catch {} };
+
+const escapeHTML = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const fmtDateJa = (iso) => {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  return `${m[1]}年${Number(m[2])}月${Number(m[3])}日`;
+};
+const toInt = (v) => { const n = parseInt(String(v ?? '').replace(/[^\d-]/g, ''), 10); return isNaN(n) ? 0 : n; };
+
+// TAISコード正規化: 数字11桁 → #####-######
+const normalizeTais = (v) => {
+  const digits = String(v ?? '').replace(/[^\d]/g, '');
+  if (digits.length === 11) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+  return String(v ?? '').trim();
+};
+
+// ===== インポートデータの無害化（バックアップJSONは信頼しない） =====
+const sanStr = (v, max = 500) => (typeof v === 'string' ? v.slice(0, max) : '');
+const sanitizeImportedSet = (s) => ({
+  id: sanStr(s && s.id, 60) || genId('st'),
+  photoId: sanStr(s && s.photoId, 60) || null,
+  place: sanStr(s && s.place, 40),
+  category: CATEGORIES.includes(s && s.category) ? s.category : CATEGORY_RENTAL,
+  item: sanStr(s && s.item, 60),
+  productName: sanStr(s && s.productName, 120),
+  maker: sanStr(s && s.maker, 60),
+  tais: sanStr(s && s.tais, 20),
+  units: toInt(s && s.units) ? String(toInt(s && s.units)) : '',
+  qty: String(Math.max(1, toInt(s && s.qty) || 1)),
+  note: sanStr(s && s.note, 120),
+});
+const sanitizeImportedReport = (r) => ({
+  id: sanStr(r && r.id, 60) || genId('rp'),
+  clientName: sanStr(r && r.clientName, 60),
+  deliveryDate: sanStr(r && r.deliveryDate, 10),
+  careManager: sanStr(r && r.careManager, 60),
+  cmOffice: sanStr(r && r.cmOffice, 80),
+  office: OFFICE_MASTER.some(o => o.name === (r && r.office)) ? r.office : '',
+  staff: sanStr(r && r.staff, 60),
+  reportType: REPORT_TYPES.includes(r && r.reportType) ? r.reportType : '納品',
+  remarks: sanStr(r && r.remarks, 4000),
+  sets: Array.isArray(r && r.sets) ? r.sets.slice(0, 100).map(sanitizeImportedSet) : [],
+  updatedAt: toInt(r && r.updatedAt) || Date.now(),
+});
+
+// AI/通信エラーを営業担当向けの日本語メッセージに変換
+const friendlyError = (err) => {
+  const msg = String((err && err.message) || err || '');
+  const status = err && err.status;
+  if (status === 401 || /authentication|invalid x-api-key/i.test(msg)) return 'APIキーが正しくありません。設定画面でキーを確認してください';
+  if (status === 429) return 'アクセスが集中しています。少し待ってからもう一度お試しください';
+  if (status >= 500) return 'AIサービス側が混み合っています。時間をおいて再試行してください';
+  if (/connection|network|fetch|timed?\s?out/i.test(msg)) return '通信できませんでした。電波状況を確認して再試行してください';
+  return msg.slice(0, 120);
+};
+
+// ===== IndexedDB（写真本体の保存先。localStorage の 5MB 制限を回避） =====
+const IDB_NAME = 'taiyo_fukushi_photos_v1';
+const IDB_STORE = 'photos';
+let idbPromise = null;
+function idbOpen() {
+  if (!idbPromise) {
+    idbPromise = new Promise((resolve, reject) => {
+      const rq = indexedDB.open(IDB_NAME, 1);
+      rq.onupgradeneeded = () => { rq.result.createObjectStore(IDB_STORE); };
+      rq.onsuccess = () => resolve(rq.result);
+      rq.onerror = () => reject(rq.error);
+    });
+  }
+  return idbPromise;
+}
+async function idbPut(id, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const rq = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(id);
+    rq.onsuccess = () => resolve(rq.result || null);
+    rq.onerror = () => reject(rq.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idbOpen();
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => resolve(false);
+  });
+}
+async function idbKeys() {
+  const db = await idbOpen();
+  return new Promise((resolve) => {
+    const rq = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).getAllKeys();
+    rq.onsuccess = () => resolve(rq.result || []);
+    rq.onerror = () => resolve([]);
+  });
+}
+
+// ===== 写真処理: EXIF向き補正込みで長辺リサイズ + JPEG圧縮 =====
+// （最近のブラウザは <img> デコード時に EXIF の向きを自動適用する）
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('画像を読み込めません'));
+    img.src = src;
+  });
+}
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(file);
+  });
+}
+async function processImageFile(file, maxEdge = 1400, quality = 0.82) {
+  const raw = await readAsDataURL(file);
+  const img = await loadImage(raw);
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const scale = Math.min(1, maxEdge / Math.max(w, h));
+  const cw = Math.max(1, Math.round(w * scale));
+  const ch = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = cw; canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, cw, ch);
+  ctx.drawImage(img, 0, 0, cw, ch);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
+// ===== PDF（レンタル単位数報告書・カタログ）からのテキスト抽出 =====
+// 日本語PDF（CIDフォント）のテキスト抽出には既定CMapが必要。
+// ビルド時に window.__PDF_CMAPS へ同梱し、ここからインメモリ供給する。
+class InlineCMapReaderFactory {
+  async fetch({ name }) {
+    const b64 = (window.__PDF_CMAPS || {})[name];
+    if (!b64) throw new Error('CMap not bundled: ' + name);
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return { cMapData: arr, compressionType: 1 /* BINARY(.bcmap) */ };
+  }
+}
+
+async function pdfToLines(arrayBuffer, onProgress) {
+  const doc = await pdfjsLib.getDocument({
+    data: arrayBuffer,
+    CMapReaderFactory: InlineCMapReaderFactory,
+    useWorkerFetch: false,
+    isEvalSupported: false, // CVE-2024-4367緩和: 細工PDFのFontMatrix経由の任意JS実行を無効化
+  }).promise;
+  // spans: 座標つきテキスト片 {text, page, x, y}。
+  // 多段組カタログでは行順の近さ≠視覚的な近さのため、座標を保持して空間探索に使う。
+  const spans = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    if (onProgress) onProgress(`PDF解析中… ${p}/${doc.numPages}ページ`);
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const rows = new Map();
+    for (const item of tc.items) {
+      if (!item.str || !item.str.trim()) continue;
+      const y = Math.round(item.transform[5] / 3) * 3;
+      if (!rows.has(y)) rows.set(y, []);
+      rows.get(y).push({ x: item.transform[4], w: item.width || item.str.length * 4, str: item.str });
+    }
+    const ys = [...rows.keys()].sort((a, b) => b - a);
+    for (const y of ys) {
+      // x方向の大きなギャップでカラム分割。小さなギャップは空白なしで結合（日本語の分断防止）
+      const items = rows.get(y).sort((a, b) => a.x - b.x);
+      let seg = [], prevEnd = null;
+      const flush = () => {
+        if (seg.length) {
+          let out = '', pe = null;
+          for (const it of seg) {
+            if (pe !== null && it.x - pe > 2) out += ' ';
+            out += it.str; pe = it.x + it.w;
+          }
+          const t = out.replace(/\s+/g, ' ').trim();
+          if (t) spans.push({ text: t, page: p, x: seg[0].x, y });
+        }
+        seg = [];
+      };
+      for (const it of items) {
+        if (prevEnd !== null && it.x - prevEnd > 18) flush();
+        seg.push(it); prevEnd = it.x + it.w;
+      }
+      flush();
+    }
+    // fake worker（メインスレッド実行）のため、ページごとにUIへ制御を返す
+    await new Promise(r => setTimeout(r, 0));
+  }
+  return { spans, lines: spans.map(s => s.text), numPages: doc.numPages, doc };
+}
+
+const TAIS_RE = /(\d{5})\s*-\s*(\d{6})/;
+const UNITS_RE = /([1-9][\d,]{0,6})\s*単位/;
+const HAS_JA_RE = /[ぁ-んァ-ヶ一-龠ー]{3,}/; // 日本語3文字以上（型番・英数トークンを商品名から除外）
+const PRICE_RE = /[￥¥]?\d{1,3}(?:,\d{3})+/;  // カンマ区切りの価格らしき数値
+
+const NOISE_WORD_RE = /[￥¥●／：]|税抜|税込|非課税|軽減|価格|在庫商品|受注生産|替えゴム|パイプ径|生産国|材質|重さ|サイズ|展開|注文|お問合せ|型番|ワイズ|片足|両足|脚部|グリップ内径|セット内容|最大使用者/;
+
+// 色名だけの行は商品名候補から除外（カタログのカラーバリエーション表記）
+const COLOR_ONLY_RE = /^(ブラック|ブルー|レッド|ホワイト|グリーン|ネイビー|ブラウン|ピンク|イエロー|グレー|グレイ|ワインレッド|ボルドー|シルバー|ベージュ|オレンジ|パープル|エンジ|カーボン柄|黒|茶|紺|赤|青|緑|紫)([A-Za-z0-9\s]*)$/;
+
+const looksLikeName = (line) => {
+  if (!line || line.length < 3) return false;
+  if (/^[●※▲◆■【（(]/.test(line)) return false;
+  if (NOISE_WORD_RE.test(line)) return false;
+  if (PRICE_RE.test(line)) return false;
+  if (!HAS_JA_RE.test(line)) return false;
+  if (COLOR_ONLY_RE.test(line.trim())) return false;
+  if (/^TAIS/i.test(line)) return false;
+  return true;
+};
+const cleanName = (line) => line
+  .replace(/^[\d\s]+/, '').replace(/\s*NEW\s*$/i, '')
+  .replace(/([ぁ-んァ-ヶ一-龠ー])\s+(?=[ぁ-んァ-ヶ一-龠ー])/g, '$1') // 日本語間の不要な空白を除去
+  .trim().slice(0, 60);
+
+// 同一行から型番・価格・TAIS・単位数を取り除いて商品名候補を得る
+const stripNoise = (line) => line
+  .replace(TAIS_RE, ' ')
+  .replace(/TAIS[\/:：]?/ig, ' ')
+  .replace(UNITS_RE, ' ')
+  .replace(/[￥¥]?\d{1,3}(?:,\d{3})+/g, ' ')
+  .replace(/[A-Za-z0-9][A-Za-z0-9\-]{2,}/g, ' ')
+  .replace(/\s+/g, ' ').trim();
+
+// TAISコード・単位数の出現位置から、空間的（同ページ・同カラム・近傍）に
+// 商品名を探索して候補を組み立てる。表形式の単位数報告書は同一行から直接取れる。
+function parseCandidatesFromLines(spans) {
+  const cands = [];
+  const seen = new Set();
+  const pushCand = (c) => {
+    const key = `${c.productName}|${c.tais}|${c.units}`;
+    if (c.productName && !seen.has(key)) { seen.add(key); cands.push(c); }
+  };
+  spans.forEach((sp) => {
+    const tm = sp.text.match(TAIS_RE);
+    const um = sp.text.match(UNITS_RE);
+    if (!tm && !um) return;
+    const tais = tm ? `${tm[1]}-${tm[2]}` : '';
+    let units = um ? toInt(um[1]) : 0;
+    let name = '';
+    // 1) 同一行に商品名が含まれるケース（表形式の単位数報告書）
+    const stripped = stripNoise(sp.text);
+    if (HAS_JA_RE.test(stripped) && !NOISE_WORD_RE.test(stripped)) name = cleanName(stripped);
+    // 2) カタログの商品見出し「0 商品名」を空間探索（同カラム・上方向を優先）
+    if (!name) {
+      let best = null;
+      for (const cand of spans) {
+        if (cand.page !== sp.page) continue;
+        const m0 = cand.text.match(/^0\s+(.+)$/);
+        if (!m0 || !HAS_JA_RE.test(m0[1]) || PRICE_RE.test(m0[1])) continue;
+        const dx = Math.abs(cand.x - sp.x);
+        const dy = cand.y - sp.y; // 正 = 見出しがTAISより上（カード内の通常配置）
+        if (dx > 160 || dy < -50 || dy > 300) continue;
+        const score = (dy >= 0 ? dy : 400 + Math.abs(dy)) + dx * 0.6;
+        if (!best || score < best.score) best = { score, name: cleanName(m0[1]) };
+      }
+      if (best) name = best.name;
+    }
+    // 3) それでも無ければ名前らしい行を空間探索
+    if (!name) {
+      let best = null;
+      for (const cand of spans) {
+        if (cand.page !== sp.page) continue;
+        if (!looksLikeName(cand.text)) continue;
+        const dx = Math.abs(cand.x - sp.x);
+        const dy = cand.y - sp.y;
+        if (dx > 160 || dy < -40 || dy > 260) continue;
+        const score = Math.abs(dy) + dx * 0.6;
+        if (!best || score < best.score) best = { score, name: cleanName(cand.text) };
+      }
+      if (best) name = best.name;
+    }
+    // 単位数は同カラムのすぐ近くから
+    if (!units) {
+      for (const cand of spans) {
+        if (cand.page !== sp.page) continue;
+        const m2 = cand.text.match(UNITS_RE);
+        if (!m2) continue;
+        if (Math.abs(cand.x - sp.x) < 160 && Math.abs(cand.y - sp.y) < 70) { units = toInt(m2[1]); break; }
+      }
+    }
+    pushCand({ productName: name, tais, units });
+  });
+  return cands;
+}
+
+// スキャンPDF用: ページを画像化（AI読み取りに渡す）
+async function renderPdfPagesToImages(doc, maxPages = 3, scale = 1.6) {
+  const images = [];
+  const n = Math.min(doc.numPages, maxPages);
+  for (let p = 1; p <= n; p++) {
+    const page = await doc.getPage(p);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    images.push(canvas.toDataURL('image/jpeg', 0.85));
+  }
+  return images;
+}
+
+// ===== AI認識（Claude API / 設定でAPIキーを入れた場合のみ有効） =====
+const AI_MODELS = [
+  { id: 'claude-opus-4-8', label: '高精度（Opus 4.8）' },
+  { id: 'claude-haiku-4-5', label: '低コスト（Haiku 4.5）' },
+];
+
+function aiClient(apiKey) {
+  // timeout: 現場の電波不良でBusyオーバーレイが固まり続けるのを防ぐ
+  return new Anthropic({ apiKey, dangerouslyAllowBrowser: true, timeout: 60000, maxRetries: 1 });
+}
+
+const PHOTO_SCHEMA = {
+  type: 'object',
+  properties: {
+    productName: { type: 'string', description: '商品名（メーカー名は含めない）。判別不能なら空文字' },
+    maker: { type: 'string', description: 'メーカー名。判別不能なら空文字' },
+    category: { type: 'string', enum: ['福祉用具貸与', '特定福祉用具', '不明'] },
+    item: { type: 'string', description: '介護保険の種目名（車いす/特殊寝台/手すり/スロープ/歩行器/歩行補助つえ/腰掛便座/入浴補助用具 等）。不明なら空文字' },
+    tais: { type: 'string', description: 'TAISコード（5桁-6桁 例 00170-000001）。写真に写っていない場合は空文字。推測で書かない' },
+    units: { type: 'integer', description: '貸与商品はレンタル単位数、特定福祉用具（販売品）は販売価格（円）。写真から読み取れた場合のみ。不明なら0' },
+    place: { type: 'string', description: '設置場所の推定（玄関/廊下/トイレ/寝室/居間/浴室/屋外/その他）。不明なら空文字' },
+    note: { type: 'string', description: '設置状況の簡潔な説明（20字以内）' },
+  },
+  required: ['productName', 'maker', 'category', 'item', 'tais', 'units', 'place', 'note'],
+  additionalProperties: false,
+};
+
+const PHOTO_PROMPT = `あなたは福祉用具貸与事業所の営業担当を支援するアシスタントです。
+この写真は介護利用者宅への福祉用具の納品・設置現場で撮影されたものです。
+写真から読み取れる情報をJSONで抽出してください。
+- 商品ラベル・銘板・型番・TAISコードが写っていれば正確に転記する（読み取れないものは推測しない）
+- 商品の種類から介護保険の種目（車いす・特殊寝台・手すり・スロープ・歩行器・歩行補助つえ 等は貸与、腰掛便座・入浴補助用具 等は特定福祉用具）を推定する
+- 設置場所（玄関・廊下・トイレ・寝室・浴室・屋外など）を写り込みから推定する`;
+
+async function aiRecognizePhoto(apiKey, model, dataUrl) {
+  const client = aiClient(apiKey);
+  const b64 = dataUrl.split(',')[1];
+  const res = await client.messages.create({
+    model,
+    max_tokens: 1024,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+        { type: 'text', text: PHOTO_PROMPT },
+      ],
+    }],
+    output_config: { format: { type: 'json_schema', schema: PHOTO_SCHEMA } },
+  });
+  if (res.stop_reason === 'refusal') throw new Error('AIが認識を拒否しました');
+  const text = (res.content.find(b => b.type === 'text') || {}).text || '{}';
+  return JSON.parse(text);
+}
+
+const DOC_SCHEMA = {
+  type: 'object',
+  properties: {
+    products: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          productName: { type: 'string' },
+          maker: { type: 'string', description: 'メーカー名。不明なら空文字' },
+          tais: { type: 'string', description: 'TAISコード（5桁-6桁）。記載がなければ空文字' },
+          units: { type: 'integer', description: 'レンタル単位数（販売品の場合は価格円）。記載がなければ0' },
+        },
+        required: ['productName', 'maker', 'tais', 'units'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['products'],
+  additionalProperties: false,
+};
+
+async function aiExtractFromDocImages(apiKey, model, dataUrls, onProgress) {
+  const client = aiClient(apiKey);
+  const all = [];
+  for (let i = 0; i < dataUrls.length; i++) {
+    if (onProgress) onProgress(`AI読み取り中… ${i + 1}/${dataUrls.length}ページ`);
+    const b64 = dataUrls[i].split(',')[1];
+    const res = await client.messages.create({
+      model,
+      max_tokens: 4096,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+          { type: 'text', text: 'これは福祉用具のレンタル単位数報告書（または商品一覧）です。記載されている商品ごとに、商品名・メーカー・TAISコード・単位数を抽出してください。読み取れない値は空文字/0にしてください。' },
+        ],
+      }],
+      output_config: { format: { type: 'json_schema', schema: DOC_SCHEMA } },
+    });
+    if (res.stop_reason === 'refusal') continue;
+    const text = (res.content.find(b => b.type === 'text') || {}).text || '{}';
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed.products)) all.push(...parsed.products);
+    } catch {}
+  }
+  return all;
+}
+
+async function aiDraftRemarks(apiKey, model, report) {
+  const client = aiClient(apiKey);
+  const itemsDesc = report.sets.map((s, i) =>
+    `${i + 1}. ${s.category || ''} ${s.item || ''} ${s.productName || ''}${s.place ? `（${s.place}）` : ''}`
+  ).join('\n');
+  const res = await client.messages.create({
+    model,
+    max_tokens: 600,
+    messages: [{
+      role: 'user',
+      content: `福祉用具貸与事業所の営業担当として、ケアマネジャー宛の「福祉用具相談報告書」の報告事項欄の文章を作成してください。
+報告区分: ${report.reportType}
+利用者: ${report.clientName || '（未入力）'}様
+納品・確認した用具:
+${itemsDesc || '（明細なし）'}
+
+条件: 敬体（です・ます調）、3〜5文、事実ベースで簡潔に。設置調整・動作確認・使用方法説明・適合確認の観点を織り込む。前置きや見出しは不要で本文のみを出力。`,
+    }],
+  });
+  return (res.content.find(b => b.type === 'text') || {}).text || '';
+}
+
+// ===== 商品マスタ（使うほど賢くなる学習辞書） =====
+function upsertMaster(master, sets) {
+  const next = [...master];
+  for (const s of sets) {
+    const name = (s.productName || '').trim();
+    if (!name) continue;
+    const idx = next.findIndex(m => m.name === name);
+    const entry = {
+      name,
+      tais: s.tais || '',
+      maker: s.maker || '',
+      category: s.category || '',
+      item: s.item || '',
+      units: toInt(s.units),
+      updatedAt: Date.now(),
+    };
+    if (idx >= 0) {
+      // 空欄は既存値を残す
+      const old = next[idx];
+      next[idx] = {
+        ...entry,
+        tais: entry.tais || old.tais,
+        maker: entry.maker || old.maker,
+        category: entry.category || old.category,
+        item: entry.item || old.item,
+        units: entry.units || old.units,
+      };
+    } else {
+      next.push(entry);
+    }
+  }
+  return next;
+}
+
+// ===== 報告書モデル =====
+const emptySet = () => ({
+  id: genId('st'), photoId: null, place: '', category: CATEGORY_RENTAL,
+  item: '', productName: '', maker: '', tais: '', units: '', qty: '1', note: '',
+});
+
+const emptyReport = (settings) => ({
+  id: genId('rp'),
+  clientName: '',
+  deliveryDate: todayISO(),
+  careManager: '',
+  cmOffice: '',
+  office: settings.office || '', // 未設定なら空欄（他営業所の情報で誤発行しないよう保存時に必須チェック）
+  staff: settings.staff || '',
+  reportType: '納品',
+  remarks: '',
+  sets: [],
+  updatedAt: Date.now(),
+});
+
+// 数値欄の意味は区分で異なる: 貸与=レンタル単位数、特定福祉用具(販売)=価格(円)
+const reportSummary = (report) => {
+  const rental = report.sets.filter(s => s.category === CATEGORY_RENTAL).length;
+  const specific = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).length;
+  const amt = (s) => toInt(s.units) * Math.max(1, toInt(s.qty) || 1);
+  const units = report.sets.filter(s => s.category === CATEGORY_RENTAL).reduce((sum, s) => sum + amt(s), 0);
+  const sales = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((sum, s) => sum + amt(s), 0);
+  return { rental, specific, units, sales };
+};
+
+// ===== 印刷帳票HTML生成（A4縦 / 明朝・ネイビーの企業文書） =====
+function buildPrintHTML(report, photoMap) {
+  const office = OFFICE_MASTER.find(o => o.name === report.office) || OFFICE_MASTER[0];
+  const { rental, specific, units, sales } = reportSummary(report);
+  const e = escapeHTML;
+
+  const cardHTML = (s, idx) => {
+    const rawPhoto = s.photoId ? photoMap[s.photoId] : null;
+    // XSS対策: dataURL画像形式のみ許可（インポートJSON等で混入した不正値を排除）
+    const photo = (typeof rawPhoto === 'string' && /^data:image\//.test(rawPhoto)) ? rawPhoto : null;
+    const catShort = s.category === CATEGORY_RENTAL ? '貸与' : s.category === CATEGORY_SPECIFIC ? '特定' : '';
+    const isSale = s.category === CATEGORY_SPECIFIC; // 販売品の数値は単位数ではなく価格(円)
+    const num = toInt(s.units);
+    const unitsDisp = num ? (isSale ? `¥${num.toLocaleString()}` : `${num.toLocaleString()} 単位`) : '―';
+    const qty = Math.max(1, toInt(s.qty) || 1);
+    return `
+    <div class="pcard">
+      <div class="pimg">${photo
+        ? `<img src="${e(photo)}" alt="">`
+        : '<span class="pnoimg">写真なし</span>'}</div>
+      <div class="pcap">
+        <div class="pcap-row1"><span class="pbadge">${idx + 1}</span><span class="pplace">納品箇所：${e(s.place || '（箇所未設定）')}</span></div>
+        <div class="pcap-row2">${catShort ? `［${catShort}］` : ''}${e(s.item || '（品目未設定）')}${qty > 1 ? `　×${qty}` : ''}</div>
+        <div class="pcap-row3">${e(s.productName || '')}${s.maker ? `（${e(s.maker)}）` : ''}</div>
+        <div class="pcap-row4"><span>TAIS：${e(s.tais || '―')}</span><span>${isSale ? '価格' : '単位数'}：${unitsDisp}</span></div>
+        ${s.note ? `<div class="pcap-note">${e(s.note)}</div>` : ''}
+      </div>
+    </div>`;
+  };
+
+  // 報告事項の行数を見積もり、1ページ目に載せるカード行数を動的に決める
+  // （長文の報告事項でカードがA4末尾からはみ出すのを防ぐ）
+  const sets = report.sets;
+  const remarksLines = (report.remarks || '').split('\n')
+    .reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 52)), 0);
+  const remarksMm = Math.max(14, remarksLines * 5.3) + 9;  // 本文(9.5pt×1.55≈5.2mm/行) + 見出し・枠
+  const page1Avail = 272 - 44 - 13 - remarksMm;            // 用紙内寸 - ヘッダー - サマリー
+  const ROW_MM = 78;                                       // カード1行分（写真52mm+キャプション+gap）
+  const page1Rows = Math.max(0, Math.min(2, Math.floor(page1Avail / ROW_MM)));
+  const pages = [];
+  pages.push(sets.slice(0, page1Rows * 2));
+  let i = page1Rows * 2;
+  while (i < sets.length) { pages.push(sets.slice(i, i + 6)); i += 6; }
+  const totalPages = pages.length;
+
+  const headerFirst = `
+    <div class="phead">
+      <div class="phead-left">
+        <div class="ptitle">福祉用具相談報告書</div>
+        <div class="pclient">${e(report.clientName || '　　　　')}<span class="pclient-suffix">様邸</span></div>
+        <div class="pcm">担当ケアマネジャー：${e(report.careManager || '―')}${report.cmOffice ? `　様（${e(report.cmOffice)}）` : '　様'}</div>
+        <div class="pgreet">平素より格別のお引き立てを賜り厚く御礼申し上げます。下記のとおりご報告申し上げます。</div>
+      </div>
+      <div class="phead-right">
+        <div class="pdate">報告日：${e(fmtDateJa(report.deliveryDate))}</div>
+        <div class="pcompany">${e(COMPANY_NAME)}</div>
+        <div class="poffice">${e(office.name)}</div>
+        <div class="paddr">〒${e(office.postal)}　${e(office.address)}</div>
+        <div class="paddr">TEL ${e(office.phone)}　FAX ${e(office.fax)}</div>
+        <div class="pstaff">担当：${e(report.staff || '　　　　')}</div>
+      </div>
+    </div>
+    <div class="psummary">
+      <span class="ptype">${e(report.reportType)}</span>
+      <span>納品日：${e(fmtDateJa(report.deliveryDate))}</span>
+      <span>貸与 ${rental} 件　／　特定福祉用具 ${specific} 件</span>
+      <span class="punits">合計 ${units.toLocaleString()} 単位${sales ? `　／　販売 ¥${sales.toLocaleString()}` : ''}</span>
+    </div>
+    <div class="premarks">
+      <div class="premarks-title">報告事項</div>
+      <div class="premarks-body">${e(report.remarks || '').replace(/\n/g, '<br>') || '　'}</div>
+    </div>`;
+
+  const headerCont = (pno) => `
+    <div class="phead-cont">
+      <span>福祉用具相談報告書　${e(report.clientName || '')}様邸</span>
+      <span>${e(COMPANY_NAME)}　${e(office.name)}</span>
+    </div>`;
+
+  const pagesHTML = pages.map((pageSets, p) => {
+    let offset = 0;
+    for (let k = 0; k < p; k++) offset += pages[k].length;
+    return `
+    <div class="doc">
+      <div class="page">
+        ${p === 0 ? headerFirst : headerCont(p + 1)}
+        <div class="pgrid">${pageSets.map((s, k) => cardHTML(s, offset + k)).join('')}</div>
+        ${p === 0 && sets.length === 0 ? '<div class="pnone">（今回の報告に用具の明細はありません）</div>' : ''}
+        <div class="pfooter">${p + 1} / ${totalPages} ページ</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `
+  <style>
+    #print-content-holder .doc {
+      width: 210mm; min-height: 296mm; padding: 12mm 13mm; box-sizing: border-box;
+      background: #fff; color: #1f2937; position: relative;
+      font-family: 'BIZ UDPMincho', 'Yu Mincho', 'Hiragino Mincho ProN', serif;
+      font-size: 9.5pt; line-height: 1.55;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact;
+      page-break-after: always;
+    }
+    #print-content-holder .doc:last-child { page-break-after: auto; }
+    #print-content-holder .page { max-width: 184mm; margin: 0 auto; }
+    #print-content-holder .phead { display: flex; gap: 6mm; }
+    #print-content-holder .phead-left { flex: 1; }
+    #print-content-holder .ptitle {
+      font-size: 20pt; letter-spacing: 0.35em; color: #1e3a8a; font-weight: bold;
+      border-bottom: 1.5px solid #3b82f6; padding-bottom: 1.5mm; margin-bottom: 4mm; white-space: nowrap;
+    }
+    #print-content-holder .pclient { font-size: 15pt; font-weight: bold; margin-bottom: 1mm; overflow-wrap: anywhere; }
+    #print-content-holder .pclient-suffix { font-size: 10.5pt; color: #2563eb; margin-left: 2mm; }
+    #print-content-holder .pcm { font-size: 10pt; color: #1f2937; margin-bottom: 2mm; }
+    #print-content-holder .pgreet { font-size: 8.5pt; color: #4b5563; }
+    #print-content-holder .phead-right {
+      width: 68mm; flex-shrink: 0; font-size: 8.5pt; color: #1f2937;
+      border: 1px solid #93c5fd; border-radius: 1.5mm; padding: 3mm; background: #f0f7ff;
+    }
+    #print-content-holder .pdate { text-align: right; margin-bottom: 1.5mm; color: #4b5563; }
+    #print-content-holder .pcompany { font-weight: bold; font-size: 10pt; color: #1e3a8a; }
+    #print-content-holder .poffice { font-weight: bold; font-size: 9.5pt; color: #1e40af; margin-bottom: 1mm; }
+    #print-content-holder .paddr { font-size: 8pt; color: #4b5563; }
+    #print-content-holder .pstaff { margin-top: 1.5mm; border-top: 1px solid #bfdbfe; padding-top: 1mm; }
+    #print-content-holder .psummary {
+      display: flex; gap: 5mm; align-items: center; flex-wrap: wrap;
+      background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 1.5mm;
+      padding: 2mm 3.5mm; margin: 3.5mm 0 3mm; font-size: 9.5pt; font-weight: bold; color: #1e3a8a;
+    }
+    #print-content-holder .ptype {
+      background: #1e3a8a; color: #fff; padding: 0.5mm 3mm; border-radius: 1mm; font-size: 9pt; letter-spacing: 0.15em;
+    }
+    #print-content-holder .punits { margin-left: auto; font-size: 10.5pt; }
+    #print-content-holder .premarks { border: 1px solid #93c5fd; border-radius: 1.5mm; margin-bottom: 3.5mm; }
+    #print-content-holder .premarks-title {
+      background: #dbeafe; color: #1e3a8a; font-weight: bold; font-size: 9pt;
+      padding: 1mm 3mm; border-bottom: 1px solid #bfdbfe; letter-spacing: 0.2em;
+    }
+    #print-content-holder .premarks-body { padding: 2mm 3mm; min-height: 14mm; font-size: 9.5pt; }
+    #print-content-holder .phead-cont {
+      display: flex; justify-content: space-between; gap: 4mm; font-size: 10pt; font-weight: bold; color: #1e3a8a;
+      border-bottom: 1px solid #93c5fd; padding-bottom: 1.5mm; margin-bottom: 4mm;
+      overflow-wrap: anywhere;
+    }
+    #print-content-holder .pgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+    #print-content-holder .pcard {
+      border: 1px solid #93c5fd; border-radius: 1.5mm; overflow: hidden;
+      page-break-inside: avoid; break-inside: avoid;
+    }
+    #print-content-holder .pimg {
+      height: 52mm; display: flex; align-items: center; justify-content: center;
+      background: #f8fbff; overflow: hidden;
+    }
+    #print-content-holder .pimg img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    #print-content-holder .pnoimg { color: #94a3b8; font-size: 9pt; }
+    #print-content-holder .pcap { border-top: 1px solid #bfdbfe; padding: 1.5mm 2.5mm; background: #fff; }
+    #print-content-holder .pcap-row1 { display: flex; align-items: center; gap: 2mm; margin-bottom: 0.5mm; }
+    #print-content-holder .pbadge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 5.5mm; height: 5.5mm; background: #1e3a8a; color: #fff;
+      font-size: 9pt; font-weight: bold; border-radius: 1mm; flex-shrink: 0;
+    }
+    #print-content-holder .pplace { font-size: 10pt; font-weight: bold; }
+    #print-content-holder .pcap-row2 { font-size: 9.5pt; }
+    #print-content-holder .pcap-row3 { font-size: 9pt; color: #1f2937; overflow-wrap: anywhere; }
+    #print-content-holder .pcap-row4 {
+      display: flex; justify-content: space-between; font-size: 8.5pt; color: #4b5563; margin-top: 0.5mm;
+    }
+    #print-content-holder .pcap-note {
+      font-size: 8pt; color: #4b5563; border-left: 2px solid #bfdbfe; padding-left: 1.5mm; margin-top: 0.5mm;
+      overflow-wrap: anywhere; max-height: 8.5mm; overflow: hidden; /* メモは最大2行で打ち切り（カード高さの暴れ防止） */
+    }
+    #print-content-holder .pnone {
+      border: 1px dashed #bfdbfe; border-radius: 1.5mm; padding: 8mm; text-align: center;
+      color: #6b7280; font-size: 9.5pt;
+    }
+    #print-content-holder .pfooter {
+      position: absolute; bottom: 6mm; right: 13mm; font-size: 8pt; color: #6b7280;
+    }
+    @media screen {
+      #print-content-holder .doc { box-shadow: 0 2px 12px rgba(0,0,0,0.35); margin: 0 auto 16px; }
+    }
+  </style>
+  ${pagesHTML}`;
+}
+
+// ===== UIコンポーネント =====
+const btn = (color) =>
+  `inline-flex items-center gap-1.5 bg-${color}-600 hover:bg-${color}-700 text-white px-3.5 py-2.5 rounded-md shadow-sm text-sm font-bold transition disabled:opacity-40 disabled:cursor-not-allowed`;
+// Tailwind purge用に使用クラスを列挙:
+// bg-emerald-600 hover:bg-emerald-700 bg-blue-600 hover:bg-blue-700 bg-rose-600 hover:bg-rose-700
+// bg-sky-600 hover:bg-sky-700 bg-indigo-600 hover:bg-indigo-700 bg-teal-600 hover:bg-teal-700
+// bg-purple-600 hover:bg-purple-700 bg-slate-600 hover:bg-slate-700 bg-fuchsia-600 hover:bg-fuchsia-700
+// bg-amber-600 hover:bg-amber-700 bg-cyan-800 hover:bg-cyan-700
+
+const inputCls = 'h-9 px-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 w-full';
+const labelCls = 'text-xs font-bold text-slate-500 mb-0.5 block';
+
+function Toast({ toast }) {
+  if (!toast) return null;
+  const isErr = toast.type === 'error';
+  return (
+    <div className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-[90] px-4 py-2.5 rounded-lg shadow-lg text-sm font-bold text-white flex items-center gap-2 ${isErr ? 'bg-rose-600' : 'bg-emerald-600'}`}>
+      {isErr ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+      <span className="whitespace-pre-wrap">{toast.msg}</span>
+    </div>
+  );
+}
+
+function BusyOverlay({ busy }) {
+  if (!busy) return null;
+  return (
+    <div className="fixed inset-0 z-[80] bg-slate-900/50 flex items-center justify-center">
+      <div className="bg-white rounded-xl px-6 py-5 shadow-xl flex items-center gap-3">
+        <Loader2 className="animate-spin text-blue-600" size={22} />
+        <span className="text-sm font-bold text-slate-700">{busy}</span>
+      </div>
+    </div>
+  );
+}
+
+// ===== 明細カード =====
+// React.memo: 利用者名や報告事項の入力中に全カード（写真img込み）が
+// 再レンダーされるのを防ぐ。propsのコールバックは親側で参照安定化済み。
+const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch }) {
+  const isSale = s.category === CATEGORY_SPECIFIC; // 販売品は単位数ではなく価格(円)
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border-b border-slate-200">
+        <span className="w-6 h-6 rounded bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
+        <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white font-bold"
+          value={s.category} onChange={e => onUpdate(s.id, { category: e.target.value, item: '' })}>
+          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white flex-1 min-w-0"
+          value={s.item} onChange={e => onUpdate(s.id, { item: e.target.value })}>
+          <option value="">品目を選択…</option>
+          {isSale ? (
+            <>
+              <optgroup label="特定福祉用具販売">
+                {SPECIFIC_ITEMS.map(it => <option key={it} value={it}>{it}</option>)}
+              </optgroup>
+              <optgroup label="貸与・販売選択制（2024年度〜）">
+                {SELECTABLE_ITEMS.map(it => <option key={it} value={it}>{it}</option>)}
+              </optgroup>
+            </>
+          ) : RENTAL_ITEMS.map(it => <option key={it} value={it}>{it}</option>)}
+        </select>
+        <button className="text-slate-400 hover:text-rose-600 shrink-0 p-2" title="明細を削除" onClick={() => onRemove(s)}><Trash2 size={16} /></button>
+      </div>
+
+      <div className="flex gap-2.5 p-2.5">
+        <div className="w-28 shrink-0">
+          {s.photoId && photo ? (
+            <div className="relative">
+              <img src={photo} alt="" className="w-28 h-28 object-cover rounded-md border border-slate-200" />
+              <button
+                className="absolute top-1 right-1 bg-slate-900/70 text-white rounded-md p-1.5"
+                title="写真を外す"
+                onClick={() => onUpdate(s.id, { photoId: null })}>
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <button
+              className="w-28 h-28 border-2 border-dashed border-slate-300 rounded-md flex flex-col items-center justify-center text-slate-400 hover:border-blue-400 hover:text-blue-500 text-[10px] gap-1"
+              onClick={() => onAttach(s.id)}>
+              <ImagePlus size={20} /> 写真を添付
+            </button>
+          )}
+          {s.photoId && (
+            <button className="mt-1.5 w-full text-[11px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded px-1 py-1.5 flex items-center justify-center gap-1 hover:bg-purple-100"
+              onClick={() => onRecognize(s)}>
+              <Sparkles size={12} /> AI認識
+            </button>
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div>
+            <input className={inputCls} list="master-list" value={s.productName} placeholder="商品名（入力するとマスタから補完）"
+              onChange={e => onUpdate(s.id, { productName: e.target.value })}
+              onBlur={e => e.target.value && onMasterMatch(s.id, e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <input className={inputCls} value={s.maker} placeholder="メーカー"
+              onChange={e => onUpdate(s.id, { maker: e.target.value })} />
+            <select className={inputCls} value={s.place}
+              onChange={e => onUpdate(s.id, { place: e.target.value })}>
+              <option value="">納品箇所…</option>
+              {PLACES.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+            <input className={`${inputCls} col-span-2 md:col-span-1 tabular-nums`} inputMode="numeric" value={s.tais} placeholder="TAISコード"
+              onChange={e => onUpdate(s.id, { tais: e.target.value })}
+              onBlur={e => onUpdate(s.id, { tais: normalizeTais(e.target.value) })} />
+            <div className="flex items-center gap-1">
+              <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.units}
+                placeholder={isSale ? '価格' : '単位数'}
+                onChange={e => onUpdate(s.id, { units: e.target.value.replace(/[^\d]/g, '') })} />
+              <span className="text-[10px] text-slate-400 shrink-0">{isSale ? '円' : '単位'}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-slate-400 shrink-0">数量</span>
+              <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.qty}
+                onChange={e => onUpdate(s.id, { qty: e.target.value.replace(/[^\d]/g, '') })} />
+            </div>
+          </div>
+          <input className={inputCls} value={s.note} maxLength={40} placeholder="メモ（帳票に印字・40字まで）"
+            onChange={e => onUpdate(s.id, { note: e.target.value })} />
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// ===== メインアプリ =====
+function App() {
+  const [view, setView] = useState('list');
+  const [reports, setReports] = useState(() => loadStorage(STORAGE_KEYS.REPORTS, []));
+  const [settings, setSettings] = useState(() => ({
+    office: '', staff: '', apiKey: '', aiModel: 'claude-opus-4-8',
+    ...loadStorage(STORAGE_KEYS.SETTINGS, {}),
+  }));
+  const [master, setMaster] = useState(() => loadStorage(STORAGE_KEYS.MASTER, []));
+  const [drafts, setDrafts] = useState(() => loadStorage(STORAGE_KEYS.DRAFTS, {}));
+  const [report, setReport] = useState(null);
+  const [photoCache, setPhotoCache] = useState({});
+  const [busy, setBusy] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [pdfCands, setPdfCands] = useState(null); // {source, items:[{productName,maker,tais,units,checked}]}
+  const [pendingDoc, setPendingDoc] = useState(null); // スキャンPDFのAI読み取り待ち
+  const toastTimer = useRef(null);
+  const draftTimer = useRef(null);
+  const openSnapshotRef = useRef(null); // 開いた時点のJSON（一致する間はドラフト化しない）
+  const prevViewRef = useRef('list');   // 設定画面から戻る先
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const pdfInputRef = useRef(null);
+  const importInputRef = useRef(null);
+  const attachTargetRef = useRef(null); // 写真をどのカードに付けるか（null=新規カード）
+
+  const showToast = useCallback((msg, type = 'ok') => {
+    clearTimeout(toastTimer.current);
+    setToast({ msg, type });
+    toastTimer.current = setTimeout(() => setToast(null), type === 'error' ? 5000 : 2600);
+  }, []);
+
+  // 永続化
+  useEffect(() => { saveStorage(STORAGE_KEYS.REPORTS, reports); }, [reports]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.MASTER, master); }, [master]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.DRAFTS, drafts); }, [drafts]);
+
+  // 編集中ドラフトの自動保存（800msデバウンス・報告書ID別・未編集ならドラフト化しない）
+  useEffect(() => {
+    if (!report) return;
+    clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      if (JSON.stringify(report) === openSnapshotRef.current) return;
+      setDrafts(d => ({ ...d, [report.id]: report }));
+    }, 800);
+    return () => clearTimeout(draftTimer.current);
+  }, [report]);
+
+  // 孤児写真のGC（起動時1回）。stateのクロージャは使わず localStorage を直接読む
+  // （起動直後の保存・インポートで増えた写真を誤削除しないため）
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try {
+        const referenced = new Set();
+        const collect = (r) => r && Array.isArray(r.sets) && r.sets.forEach(s => s && s.photoId && referenced.add(s.photoId));
+        loadStorage(STORAGE_KEYS.REPORTS, []).forEach(collect);
+        Object.values(loadStorage(STORAGE_KEYS.DRAFTS, {})).forEach(collect);
+        const keys = await idbKeys();
+        for (const k of keys) if (!referenced.has(k)) await idbDel(k);
+      } catch {}
+    }, 6000);
+    return () => clearTimeout(t);
+  }, []);
+
+  // 一覧に戻ったら写真のメモリキャッシュを解放（報告書を渡り歩いた際の肥大化防止）
+  useEffect(() => { if (view === 'list') setPhotoCache({}); }, [view]);
+
+  // ---- 写真キャッシュ（IndexedDB → メモリ） ----
+  const ensurePhotos = useCallback(async (ids) => {
+    const map = {};
+    const add = {};
+    for (const id of ids) {
+      if (!id) continue;
+      const v = photoCache[id] || await idbGet(id);
+      if (v) { map[id] = v; if (!photoCache[id]) add[id] = v; }
+    }
+    // 関数型更新: await中の並行更新（写真追加等）を巻き戻さない
+    if (Object.keys(add).length) setPhotoCache(c => ({ ...c, ...add }));
+    return map;
+  }, [photoCache]);
+
+  useEffect(() => {
+    if (report) ensurePhotos(report.sets.map(s => s.photoId).filter(Boolean));
+  }, [report && report.sets.map(s => s.photoId).join(',')]);
+
+  // ---- 報告書操作 ----
+  const openNew = () => {
+    const r = emptyReport(settings);
+    openSnapshotRef.current = JSON.stringify(r);
+    setReport(r); setView('edit');
+  };
+  const openReport = (r) => {
+    const src = drafts[r.id] || r; // 同じ報告書の未保存下書きがあれば優先して開く
+    const copy = JSON.parse(JSON.stringify(src));
+    openSnapshotRef.current = drafts[r.id] ? null : JSON.stringify(copy);
+    setReport(copy); setView('edit');
+  };
+  const resumeDraft = (d) => {
+    openSnapshotRef.current = null; // 下書きは常に未保存扱い
+    setReport(JSON.parse(JSON.stringify(d))); setView('edit');
+  };
+  const discardDraft = (d) => {
+    if (!confirm(`「${d.clientName || '無題'} 様邸」の下書きを破棄しますか？`)) return;
+    setDrafts(ds => { const n = { ...ds }; delete n[d.id]; return n; });
+  };
+
+  const updateReport = (patch) => setReport(r => ({ ...r, ...patch, updatedAt: Date.now() }));
+  // SetCard(React.memo)へ渡すため参照を安定化
+  const updateSet = useCallback((setId, patch) =>
+    setReport(r => ({ ...r, updatedAt: Date.now(), sets: r.sets.map(s => s.id === setId ? { ...s, ...patch } : s) })), []);
+
+  // 商品名からマスタ照合 → 空欄を自動補完
+  const applyMasterMatch = (setId, name) => {
+    const hit = master.find(m => m.name === name.trim());
+    if (!hit) return;
+    setReport(r => ({
+      ...r, updatedAt: Date.now(),
+      sets: r.sets.map(s => {
+        if (s.id !== setId) return s;
+        return {
+          ...s,
+          tais: s.tais || hit.tais,
+          maker: s.maker || hit.maker,
+          // 区分はユーザーが品目を選ぶ前のみマスタ値で補完（選択済みの区分を無断で上書きしない）
+          category: (!s.item && hit.category) ? hit.category : s.category,
+          item: s.item || hit.item,
+          units: toInt(s.units) ? s.units : (hit.units ? String(hit.units) : s.units),
+        };
+      }),
+    }));
+    showToast(`マスタから補完しました：${hit.name}`);
+  };
+
+  // 写真実体は消さない（保存前の編集は取り消せる必要がある）。実体回収は起動時GCに一本化
+  const removeSet = useCallback((s) => {
+    if (!confirm('この明細を削除しますか？')) return;
+    setReport(r => ({ ...r, updatedAt: Date.now(), sets: r.sets.filter(x => x.id !== s.id) }));
+  }, []);
+
+  const saveReport = () => {
+    if (!report.clientName.trim()) { showToast('利用者名を入力してください', 'error'); return; }
+    if (!report.office) { showToast('営業所を選択してください（帳票の発行元になります）', 'error'); return; }
+    const rep = { ...report, deliveryDate: report.deliveryDate || todayISO(), updatedAt: Date.now() };
+    clearTimeout(draftTimer.current); // 保存直前のデバウンスで下書きが復活しないように
+    setReport(rep);
+    setReports(list => {
+      const idx = list.findIndex(r => r.id === rep.id);
+      const next = [...list];
+      if (idx >= 0) next[idx] = rep; else next.unshift(rep);
+      return next;
+    });
+    setMaster(m => upsertMaster(m, rep.sets));
+    setDrafts(ds => { const n = { ...ds }; delete n[rep.id]; return n; });
+    openSnapshotRef.current = JSON.stringify(rep);
+    showToast('保存しました（商品マスタにも学習済み）');
+  };
+
+  const deleteReport = (r) => {
+    if (!confirm(`「${r.clientName || '無題'} 様邸」の報告書を削除しますか？\n（添付写真は次回起動時に自動整理されます）`)) return;
+    setReports(list => list.filter(x => x.id !== r.id));
+    setDrafts(ds => { const n = { ...ds }; delete n[r.id]; return n; });
+    showToast('削除しました');
+  };
+
+  const duplicateReport = (r) => {
+    const copy = JSON.parse(JSON.stringify(r));
+    copy.id = genId('rp');
+    copy.deliveryDate = todayISO();
+    copy.updatedAt = Date.now();
+    // 写真は複製しない（同じphotoIdを共有すると片方削除で消えるため外す）
+    // 報告事項も引き継がない（前回訪問の報告文を書き直さず提出する事故を防ぐ）
+    copy.remarks = '';
+    copy.sets = copy.sets.map(s => ({ ...s, id: genId('st'), photoId: null }));
+    openSnapshotRef.current = null;
+    setReport(copy); setView('edit');
+    showToast('複製しました（写真と報告事項は引き継ぎません）');
+  };
+
+  // ---- 写真添付 ----
+  const handleFiles = async (files, targetSetId) => {
+    const list = Array.from(files || []).filter(f => f.type.startsWith('image/'));
+    if (!list.length) return;
+    try {
+      const cacheAdd = {};
+      const newSets = [];
+      let target = targetSetId;
+      let done = 0;
+      for (const f of list) {
+        setBusy(`写真を取り込み中… ${++done}/${list.length}枚（自動リサイズ）`);
+        const dataUrl = await processImageFile(f);
+        const photoId = genId('ph');
+        await idbPut(photoId, dataUrl);
+        cacheAdd[photoId] = dataUrl;
+        if (target) {
+          const tid = target; target = null; // 2枚目以降は新規カード
+          setReport(r => ({ ...r, updatedAt: Date.now(), sets: r.sets.map(s => s.id === tid ? { ...s, photoId } : s) }));
+        } else {
+          newSets.push({ ...emptySet(), photoId });
+        }
+      }
+      if (newSets.length) setReport(r => ({ ...r, updatedAt: Date.now(), sets: [...r.sets, ...newSets] }));
+      setPhotoCache(c => ({ ...c, ...cacheAdd }));
+      showToast(`${list.length}枚の写真を取り込みました`);
+    } catch (err) {
+      showToast(`写真の取り込みに失敗：${err.message}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  // ---- AI認識 ----
+  const requireApiKey = () => {
+    if (!settings.apiKey) {
+      showToast('AI認識を使うには「設定」でAPIキーを入力してください', 'error');
+      prevViewRef.current = 'edit';
+      setView('settings');
+      return false;
+    }
+    return true;
+  };
+
+  const recognizeSet = async (s, silent) => {
+    if (!requireApiKey()) return false;
+    const photo = photoCache[s.photoId] || await idbGet(s.photoId);
+    if (!photo) { if (!silent) showToast('写真がありません', 'error'); return false; }
+    try {
+      const rec = await aiRecognizePhoto(settings.apiKey, settings.aiModel, photo);
+      setReport(r => ({
+        ...r, updatedAt: Date.now(),
+        sets: r.sets.map(x => {
+          if (x.id !== s.id) return x;
+          const category = CATEGORIES.includes(rec.category) ? rec.category : x.category;
+          return {
+            ...x,
+            productName: x.productName || rec.productName || '',
+            maker: x.maker || rec.maker || '',
+            category: x.productName ? x.category : category,
+            item: x.item || rec.item || '',
+            tais: x.tais || normalizeTais(rec.tais || ''),
+            units: toInt(x.units) ? x.units : (rec.units ? String(rec.units) : x.units),
+            place: x.place || rec.place || '',
+            note: x.note || rec.note || '',
+          };
+        }),
+      }));
+      // マスタ照合でTAIS/単位数を追加補完
+      if (rec.productName) {
+        const hit = master.find(m => m.name === rec.productName.trim());
+        if (hit) applyMasterMatch(s.id, rec.productName);
+      }
+      return true;
+    } catch (err) {
+      if (!silent) showToast(`AI認識に失敗：${friendlyError(err)}`, 'error');
+      return false;
+    }
+  };
+
+  const recognizeOne = async (s) => {
+    if (!requireApiKey()) return;
+    setBusy('AIが写真を認識中…');
+    const ok = await recognizeSet(s, false);
+    setBusy(null);
+    if (ok) showToast('AI認識の結果を反映しました（入力済みの欄は上書きしません）');
+  };
+
+  const recognizeAll = async () => {
+    if (!requireApiKey()) return;
+    const targets = report.sets.filter(s => s.photoId && !s.productName);
+    if (!targets.length) { showToast('未認識の写真がありません'); return; }
+    let done = 0;
+    for (const s of targets) {
+      setBusy(`AIが写真を認識中… ${done + 1}/${targets.length}枚`);
+      if (await recognizeSet(s, true)) done++;
+    }
+    setBusy(null);
+    showToast(`${done}/${targets.length}枚を認識しました`);
+  };
+
+  const draftRemarks = async () => {
+    if (!requireApiKey()) return;
+    setBusy('AIが報告事項の下書きを作成中…');
+    try {
+      const text = await aiDraftRemarks(settings.apiKey, settings.aiModel, report);
+      updateReport({ remarks: report.remarks ? report.remarks + '\n' + text : text });
+      showToast('報告事項の下書きを追記しました');
+    } catch (err) {
+      showToast(`下書き作成に失敗：${friendlyError(err)}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  // ---- SetCard(React.memo)へ渡す安定コールバック（最新の実装はrefで参照） ----
+  const recognizeOneRef = useRef(null);
+  recognizeOneRef.current = recognizeOne;
+  const onRecognizeStable = useCallback((s) => { recognizeOneRef.current && recognizeOneRef.current(s); }, []);
+  const masterMatchRef = useRef(null);
+  masterMatchRef.current = applyMasterMatch;
+  const onMasterMatchStable = useCallback((setId, name) => { masterMatchRef.current && masterMatchRef.current(setId, name); }, []);
+  const onAttachStable = useCallback((setId) => {
+    attachTargetRef.current = setId;
+    if (fileInputRef.current) fileInputRef.current.click();
+  }, []);
+
+  // ---- レンタル単位数報告書（PDF）取込 ----
+  const handlePdf = async (file) => {
+    if (!file) return;
+    setBusy('PDFを解析中…');
+    setPendingDoc(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const { spans, doc } = await pdfToLines(buf, setBusy);
+      const cands = parseCandidatesFromLines(spans);
+      if (cands.length) {
+        setPendingDoc({ name: file.name, doc }); // 「AIで読み取り直す」用に保持
+        setPdfCands({
+          source: file.name,
+          items: cands.map(c => ({ ...c, maker: c.maker || '', checked: true })),
+        });
+        showToast(`${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
+      } else {
+        // テキストが取れない（スキャンPDF等）→ AI読み取りを提案
+        setPendingDoc({ name: file.name, doc });
+        showToast('テキストを抽出できませんでした。スキャンPDFの場合は「AIで読み取る」をお試しください', 'error');
+      }
+    } catch (err) {
+      showToast(`PDF解析に失敗：${friendlyError(err)}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  const aiReadPendingDoc = async () => {
+    if (!pendingDoc || !requireApiKey()) return;
+    setBusy('PDFページを画像化中…');
+    try {
+      const images = await renderPdfPagesToImages(pendingDoc.doc, 3);
+      const products = await aiExtractFromDocImages(settings.apiKey, settings.aiModel, images, setBusy);
+      if (products.length) {
+        setPdfCands({
+          source: pendingDoc.name + '（AI読み取り）',
+          items: products.map(c => ({
+            productName: c.productName || '', maker: c.maker || '',
+            tais: normalizeTais(c.tais || ''), units: toInt(c.units), checked: true,
+          })).filter(c => c.productName),
+        });
+        setPendingDoc(null);
+        showToast(`AIが${products.length}件を読み取りました`);
+      } else {
+        showToast('商品情報を読み取れませんでした', 'error');
+      }
+    } catch (err) {
+      showToast(`AI読み取りに失敗：${friendlyError(err)}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  // 候補 → 明細へ反映（写真だけのカードに順に割り当て、余りは新規カード）
+  const applyCandidates = () => {
+    const chosen = pdfCands.items.filter(c => c.checked);
+    if (!chosen.length) { showToast('追加する行を選択してください', 'error'); return; }
+    setReport(r => {
+      const sets = [...r.sets];
+      const queue = [...chosen];
+      // 1) 商品名が空のカード（写真だけ添付済み）に順に割り当て
+      for (let i = 0; i < sets.length && queue.length; i++) {
+        if (!sets[i].productName) {
+          const c = queue.shift();
+          sets[i] = {
+            ...sets[i],
+            productName: c.productName, maker: c.maker || sets[i].maker,
+            tais: c.tais || sets[i].tais,
+            units: toInt(sets[i].units) ? sets[i].units : (c.units ? String(c.units) : sets[i].units),
+          };
+        }
+      }
+      // 2) 余りは新規カード
+      for (const c of queue) {
+        sets.push({ ...emptySet(), productName: c.productName, maker: c.maker || '', tais: c.tais || '', units: c.units ? String(c.units) : '' });
+      }
+      return { ...r, updatedAt: Date.now(), sets };
+    });
+    setMaster(m => upsertMaster(m, chosen.map(c => ({ productName: c.productName, tais: c.tais, maker: c.maker, units: c.units }))));
+    setPdfCands(null);
+    setPendingDoc(null); // 反映完了後は「テキストを抽出できませんでした」バナーを出さない
+    showToast(`${chosen.length}件を明細に反映しました`);
+  };
+
+  // ---- 印刷 / PDF ----
+  const openPrint = async () => {
+    if (!report.office) { showToast('営業所を選択してください（帳票の発行元になります）', 'error'); return; }
+    setBusy('帳票を作成中…');
+    try {
+      const map = await ensurePhotos(report.sets.map(s => s.photoId).filter(Boolean));
+      const holder = document.getElementById('print-content-holder');
+      holder.innerHTML = buildPrintHTML(report, map);
+      // 写真のデコード完了を待ってから表示（プレビュー直後の印刷での白抜け防止）
+      await Promise.allSettled([...holder.querySelectorAll('img')].map(im => im.decode ? im.decode() : Promise.resolve()));
+      setPrintOpen(true);
+    } finally { setBusy(null); }
+  };
+  const closePrint = () => {
+    setPrintOpen(false);
+    const holder = document.getElementById('print-content-holder');
+    holder.innerHTML = '';
+  };
+  const doPrint = () => window.print();
+
+  const savePdf = async () => {
+    setBusy('PDFを生成中…（写真の枚数により数十秒かかります）');
+    try {
+      const holder = document.getElementById('print-content-holder');
+      const docs = holder.querySelectorAll('.doc');
+      if (!docs.length) return;
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      for (let i = 0; i < docs.length; i++) {
+        setBusy(`PDFを生成中… ${i + 1}/${docs.length}ページ`);
+        await new Promise(r => setTimeout(r, 30)); // ページ間でUIスレッドに制御を返す
+        const canvas = await html2canvas(docs[i], { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+        const img = canvas.toDataURL('image/jpeg', 0.9);
+        if (i > 0) pdf.addPage();
+        // 実寸比で貼付（コンテンツがA4を超えた場合は歪ませず末尾で切る）
+        const imgHmm = canvas.height * 210 / canvas.width;
+        pdf.addImage(img, 'JPEG', 0, 0, 210, imgHmm);
+      }
+      const name = `福祉用具相談報告書_${report.clientName || '無題'}様邸_${report.deliveryDate}.pdf`;
+      pdf.save(name);
+      showToast('PDFを保存しました（端末のダウンロードに保存されます）');
+    } catch (err) {
+      showToast(`PDF生成に失敗：${err.message}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  // ---- データ移行（JSONエクスポート/インポート） ----
+  const exportAll = async () => {
+    setBusy('エクスポート中…');
+    try {
+      const photos = {};
+      for (const r of reports) for (const s of r.sets) {
+        if (s.photoId && !photos[s.photoId]) {
+          const v = await idbGet(s.photoId);
+          if (v) photos[s.photoId] = v;
+        }
+      }
+      const payload = { app: 'taiyo-fukushi-report', version: 1, exportedAt: new Date().toISOString(), reports, master, photos };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `福祉用具相談報告書_バックアップ_${todayISO()}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast('エクスポートしました');
+    } finally { setBusy(null); }
+  };
+
+  const importAll = async (file) => {
+    if (!file) return;
+    setBusy('インポート中…');
+    try {
+      const payload = JSON.parse(await file.text());
+      if (!payload || payload.app !== 'taiyo-fukushi-report') throw new Error('このアプリのバックアップファイルではありません');
+      // 写真: dataURL画像のみ受け入れ（不正な文字列の混入＝印刷HTMLへのXSS供給源を遮断）
+      let photoCount = 0;
+      for (const [id, v] of Object.entries(payload.photos || {})) {
+        if (typeof id === 'string' && typeof v === 'string' && /^data:image\//.test(v) && v.length < 4 * 1024 * 1024) {
+          await idbPut(id.slice(0, 60), v);
+          photoCount++;
+        }
+      }
+      // 報告書: 構造・型を強制してから取り込む
+      const incoming = (Array.isArray(payload.reports) ? payload.reports : []).slice(0, 500).map(sanitizeImportedReport);
+      setReports(list => {
+        const map = new Map(list.map(r => [r.id, r]));
+        for (const r of incoming) {
+          const cur = map.get(r.id);
+          if (!cur || (r.updatedAt || 0) > (cur.updatedAt || 0)) map.set(r.id, r);
+        }
+        return [...map.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      });
+      // マスタ: updatedAtが新しい側を採用（古いバックアップで最新の修正を潰さない）
+      setMaster(list => {
+        const map = new Map(list.map(m => [m.name, m]));
+        for (const raw of (Array.isArray(payload.master) ? payload.master : []).slice(0, 2000)) {
+          const m = {
+            name: sanStr(raw && raw.name, 120), tais: sanStr(raw && raw.tais, 20),
+            maker: sanStr(raw && raw.maker, 60),
+            category: CATEGORIES.includes(raw && raw.category) ? raw.category : '',
+            item: sanStr(raw && raw.item, 60),
+            units: toInt(raw && raw.units), updatedAt: toInt(raw && raw.updatedAt),
+          };
+          if (!m.name) continue;
+          const cur = map.get(m.name);
+          if (!cur || (m.updatedAt || 0) > (cur.updatedAt || 0)) map.set(m.name, m);
+        }
+        return [...map.values()];
+      });
+      showToast(`インポートしました（報告書${incoming.length}件・写真${photoCount}枚）`);
+    } catch (err) {
+      showToast(`インポートに失敗：${err.message}`, 'error');
+    } finally { setBusy(null); }
+  };
+
+  // ================= 画面 =================
+
+  // ---- 一覧 ----
+  const renderList = () => (
+    <div className="max-w-3xl mx-auto p-4 pb-24">
+      <header className="flex items-center gap-3 py-4">
+        <div className="bg-blue-600 text-white rounded-lg p-2"><ClipboardList size={22} /></div>
+        <div>
+          <h1 className="text-lg font-bold text-slate-800">福祉用具相談報告書</h1>
+          <p className="text-xs text-slate-500">{COMPANY_NAME}</p>
+        </div>
+        <button className="ml-auto text-slate-500 hover:text-slate-700 p-2" onClick={() => { prevViewRef.current = 'list'; setView('settings'); }} title="設定">
+          <Settings size={20} />
+        </button>
+      </header>
+
+      <button className={`${btn('emerald')} w-full justify-center py-3.5 text-base`} onClick={openNew}>
+        <Plus size={18} /> 新しい報告書を作成
+      </button>
+
+      {Object.keys(drafts).length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {Object.values(drafts).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(d => (
+            <div key={d.id} className="flex items-center gap-2 border-2 border-dashed border-amber-400 bg-amber-50 rounded-md pl-3 pr-1 py-1.5">
+              <FileText size={16} className="text-amber-600 shrink-0" />
+              <button className="flex-1 min-w-0 text-left text-sm font-bold text-amber-800 truncate py-1.5 hover:underline"
+                onClick={() => resumeDraft(d)}>
+                保存していない下書き：{d.clientName || '（無題）'} 様邸 — 再開する
+              </button>
+              <button className="text-amber-500 hover:text-rose-600 p-2.5 shrink-0" title="下書きを破棄" onClick={() => discardDraft(d)}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-5 space-y-2">
+        {reports.length === 0 && (
+          <p className="text-center text-sm text-slate-400 py-10">保存された報告書はまだありません</p>
+        )}
+        {reports.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(r => {
+          const sm = reportSummary(r);
+          return (
+            <div key={r.id} className="bg-white rounded-lg border border-slate-200 shadow-sm p-3 flex items-center gap-3">
+              <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openReport(r)}>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-800 truncate">{r.clientName || '（無題）'} 様邸</span>
+                  <span className="text-[10px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-bold shrink-0">{r.reportType}</span>
+                </div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {fmtDateJa(r.deliveryDate)}　写真{r.sets.filter(s => s.photoId).length}枚　貸与{sm.rental}件/特定{sm.specific}件　{sm.units.toLocaleString()}単位
+                </div>
+              </div>
+              <button className="text-slate-400 hover:text-teal-600 p-2.5" title="複製" onClick={() => duplicateReport(r)}><Copy size={18} /></button>
+              <button className="text-slate-400 hover:text-rose-600 p-2.5" title="削除" onClick={() => deleteReport(r)}><Trash2 size={18} /></button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-8 flex gap-2 justify-center">
+        <button className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 border border-slate-300 rounded px-3 py-1.5 bg-white"
+          onClick={exportAll}><Download size={13} /> 全データをエクスポート</button>
+        <button className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 border border-slate-300 rounded px-3 py-1.5 bg-white"
+          onClick={() => importInputRef.current?.click()}><Upload size={13} /> インポート</button>
+      </div>
+    </div>
+  );
+
+  // ---- 設定 ----
+  const renderSettings = () => (
+    <div className="max-w-2xl mx-auto p-4 pb-24">
+      <header className="flex items-center gap-2 py-4">
+        <button className="text-slate-500 hover:text-slate-800 p-1.5"
+          onClick={() => setView(prevViewRef.current === 'edit' && report ? 'edit' : 'list')}><ArrowLeft size={20} /></button>
+        <h1 className="text-lg font-bold text-slate-800">設定</h1>
+      </header>
+
+      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 space-y-4">
+        <h2 className="text-sm font-bold text-slate-700 flex items-center gap-1.5"><FolderOpen size={15} /> 既定値（新規作成時に自動セット）</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>営業所</label>
+            <select className={inputCls} value={settings.office}
+              onChange={e => setSettings(s => ({ ...s, office: e.target.value }))}>
+              <option value="">（未設定）</option>
+              {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls}>担当者名</label>
+            <input className={inputCls} value={settings.staff} placeholder="例：山田 太郎"
+              onChange={e => setSettings(s => ({ ...s, staff: e.target.value }))} />
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4 space-y-3">
+        <h2 className="text-sm font-bold text-slate-700 flex items-center gap-1.5"><Sparkles size={15} className="text-purple-600" /> AI認識（任意）</h2>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Anthropic APIキーを入力すると、写真からの商品名・TAISコード・設置場所の自動認識、
+          スキャンPDFの読み取り、報告事項の下書き作成が使えます。
+          キーはこの端末のブラウザ内にのみ平文で保存され、写真は認識のときだけAPIに送信されます。
+          共用PCでは使用後にキーを消すことをおすすめします（漏えい時はAnthropicのコンソールからキーを無効化できます）。
+          目安コスト：写真1枚あたり 約1〜3円（モデルによる）。
+        </p>
+        <div>
+          <label className={labelCls}>APIキー</label>
+          <input className={inputCls} type="password" value={settings.apiKey} placeholder="sk-ant-…"
+            onChange={e => setSettings(s => ({ ...s, apiKey: e.target.value.trim() }))} />
+        </div>
+        <div>
+          <label className={labelCls}>モデル</label>
+          <select className={inputCls} value={settings.aiModel}
+            onChange={e => setSettings(s => ({ ...s, aiModel: e.target.value }))}>
+            {AI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4">
+        <h2 className="text-sm font-bold text-slate-700 mb-2">商品マスタ（学習済み {master.length} 件）</h2>
+        <p className="text-xs text-slate-500 mb-2">保存やPDF取込のたびに自動で貯まります。商品名を入力すると TAIS・単位数が自動補完されます。</p>
+        <div className="max-h-64 overflow-y-auto divide-y divide-slate-100">
+          {master.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(m => (
+            <div key={m.name} className="flex items-center gap-2 py-1.5 text-xs">
+              <span className="flex-1 min-w-0 truncate font-bold text-slate-700">{m.name}</span>
+              <span className="text-slate-400 tabular-nums shrink-0">{m.tais || '―'}</span>
+              <span className="text-slate-500 tabular-nums w-20 text-right shrink-0">
+                {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units}単位`) : ''}
+              </span>
+              <button className="text-slate-300 hover:text-rose-600 shrink-0 p-2 -my-1" title="マスタから削除"
+                onClick={() => { if (confirm(`商品マスタから「${m.name}」を削除しますか？`)) setMaster(list => list.filter(x => x.name !== m.name)); }}>
+                <X size={16} /></button>
+            </div>
+          ))}
+          {!master.length && <p className="text-xs text-slate-400 py-3 text-center">まだ学習した商品はありません</p>}
+        </div>
+      </div>
+    </div>
+  );
+
+  // 集計はsetsが変わったときだけ再計算（1文字入力ごとのfilter/reduceを避ける）
+  const sm = useMemo(() => (report ? reportSummary(report) : null), [report && report.sets]);
+
+  // ---- 編集 ----
+  const renderEdit = () => {
+    return (
+      <div className="max-w-4xl mx-auto p-3 md:p-4 pb-36">
+        <header className="flex items-center gap-2 py-3">
+          <button className="text-slate-500 hover:text-slate-800 p-1.5"
+            onClick={() => { setView('list'); }}><ArrowLeft size={20} /></button>
+          <h1 className="text-base md:text-lg font-bold text-slate-800 flex-1">報告書の作成・編集</h1>
+          <button className="text-slate-500 hover:text-slate-700 p-2" onClick={() => { prevViewRef.current = 'edit'; setView('settings'); }}><Settings size={18} /></button>
+        </header>
+
+        {/* 基本情報 */}
+        <section className="bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+            <div className="col-span-2 md:col-span-1">
+              <label className={labelCls}>利用者名 <span className="text-rose-500">*</span></label>
+              <div className="flex items-center gap-1">
+                <input className={inputCls} value={report.clientName} placeholder="例：山田 花子"
+                  onChange={e => updateReport({ clientName: e.target.value })} />
+                <span className="text-xs text-slate-500 shrink-0">様邸</span>
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>納品日・訪問日</label>
+              <input className={inputCls} type="date" value={report.deliveryDate}
+                onChange={e => updateReport({ deliveryDate: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>報告区分</label>
+              <select className={inputCls} value={report.reportType}
+                onChange={e => updateReport({ reportType: e.target.value })}>
+                {REPORT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>営業所</label>
+              <select className={inputCls} value={report.office}
+                onChange={e => updateReport({ office: e.target.value })}>
+                <option value="">（営業所を選択）</option>
+                {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>担当ケアマネジャー</label>
+              <input className={inputCls} value={report.careManager} placeholder="例：佐藤 一郎"
+                onChange={e => updateReport({ careManager: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>居宅介護支援事業所</label>
+              <input className={inputCls} value={report.cmOffice} placeholder="例：○○ケアプランセンター"
+                onChange={e => updateReport({ cmOffice: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>担当者（自社）</label>
+              <input className={inputCls} value={report.staff}
+                onChange={e => updateReport({ staff: e.target.value })} />
+            </div>
+            <div className="flex items-end">
+              <div className="text-xs text-slate-600 bg-blue-50 border border-blue-200 rounded-md px-2.5 py-2 w-full tabular-nums">
+                貸与 <b>{sm.rental}</b> 件／特定 <b>{sm.specific}</b> 件　<b>{sm.units.toLocaleString()}</b> 単位
+                {sm.sales > 0 && <>　販売 <b>¥{sm.sales.toLocaleString()}</b></>}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 取込ボタン群 */}
+        <section className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+          <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
+            <ImagePlus size={16} /> 写真を追加
+          </button>
+          <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
+            <Camera size={16} /> カメラで撮影
+          </button>
+          <button className={`${btn('indigo')} justify-center`} onClick={() => pdfInputRef.current?.click()}>
+            <FileUp size={16} /> 単位数報告書PDF取込
+          </button>
+          <button className={`${btn('purple')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
+            title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
+            onClick={recognizeAll}>
+            <Sparkles size={16} /> AIで全写真を認識
+          </button>
+          <p className="col-span-2 md:col-span-4 text-[11px] text-slate-500 leading-relaxed">
+            PDF取込＝レンタル単位数報告書やカタログから商品名・TAIS・単位数を自動入力／AI認識＝写真から商品情報を自動入力
+            {!settings.apiKey && '（AI機能は設定画面でAPIキーを登録すると使えます）'}
+          </p>
+        </section>
+
+        {pendingDoc && !pdfCands && (
+          <div className="mt-2 bg-amber-50 border border-amber-300 rounded-md p-3 flex items-center gap-3 text-sm">
+            <AlertTriangle className="text-amber-500 shrink-0" size={18} />
+            <span className="flex-1 text-amber-800 text-xs md:text-sm">「{pendingDoc.name}」からテキストを抽出できませんでした（スキャンPDFの可能性）。</span>
+            <button className={btn('purple')} onClick={aiReadPendingDoc}><Wand2 size={15} /> AIで読み取る</button>
+            <button className="text-slate-400 hover:text-slate-600" onClick={() => setPendingDoc(null)}><X size={16} /></button>
+          </div>
+        )}
+
+        {/* 明細カード */}
+        <section className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {report.sets.map((s, idx) => (
+            <SetCard
+              key={s.id}
+              s={s}
+              idx={idx}
+              photo={s.photoId ? (photoCache[s.photoId] || null) : null}
+              onUpdate={updateSet}
+              onRemove={removeSet}
+              onRecognize={onRecognizeStable}
+              onAttach={onAttachStable}
+              onMasterMatch={onMasterMatchStable}
+            />
+          ))}
+
+          <button
+            className="min-h-[120px] border-2 border-dashed border-slate-300 rounded-lg flex flex-col items-center justify-center text-slate-400 hover:border-emerald-400 hover:text-emerald-600 gap-1 text-sm font-bold bg-white/50"
+            onClick={() => setReport(r => ({ ...r, updatedAt: Date.now(), sets: [...r.sets, emptySet()] }))}>
+            <Plus size={22} /> 明細を追加（写真なし）
+          </button>
+        </section>
+
+        {/* 報告事項 */}
+        <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
+          <div className="flex items-center gap-2 mb-2">
+            <h2 className="text-sm font-bold text-slate-700">報告事項</h2>
+            <button className="ml-auto text-[11px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded px-2 py-1 flex items-center gap-1 hover:bg-purple-100"
+              onClick={draftRemarks}><Wand2 size={12} /> AIで下書き</button>
+          </div>
+          <textarea
+            className="w-full border border-slate-300 rounded-md text-sm p-2.5 min-h-[110px] focus:outline-none focus:ring-2 focus:ring-blue-400"
+            value={report.remarks} placeholder="納品・調整・説明の内容、利用状況、ケアマネジャーへの申し送り事項など"
+            onChange={e => updateReport({ remarks: e.target.value })} />
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {TEMPLATE_PHRASES.map((t, i) => (
+              <button key={i}
+                className="text-[11px] text-slate-600 bg-slate-100 hover:bg-blue-100 hover:text-blue-700 rounded-full px-2.5 py-1 border border-slate-200"
+                title={t}
+                onClick={() => updateReport({ remarks: report.remarks ? report.remarks + '\n' + t : t })}>
+                {t.slice(0, 24)}…
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* マスタ候補（datalist） */}
+        <datalist id="master-list">
+          {master.map(m => <option key={m.name} value={m.name} />)}
+        </datalist>
+
+        {/* 下部固定アクションバー */}
+        <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 p-2.5 z-40 no-print">
+          <div className="max-w-4xl mx-auto flex gap-2">
+            <button className={`${btn('blue')} flex-1 justify-center`} onClick={saveReport}>
+              <Save size={16} /> 保存
+            </button>
+            <button className={`${btn('sky')} flex-1 justify-center`} onClick={openPrint}>
+              <Printer size={16} /> 印刷プレビュー
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ---- PDF候補ピッカー ----
+  const renderPdfCands = () => (
+    <div className="fixed inset-0 z-[70] bg-slate-900/60 flex items-center justify-center p-3">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+          <FileText size={17} className="text-indigo-600" />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-bold text-slate-800">抽出された商品候補</h2>
+            <p className="text-[11px] text-slate-500 truncate">{pdfCands.source}</p>
+          </div>
+          <button className="text-slate-400 hover:text-slate-600 p-1" onClick={() => { setPdfCands(null); setPendingDoc(null); }}><X size={18} /></button>
+        </div>
+        <div className="px-4 py-2 flex gap-2 text-xs border-b border-slate-100">
+          <button className="text-blue-600 font-bold" onClick={() => setPdfCands(c => ({ ...c, items: c.items.map(i => ({ ...i, checked: true })) }))}>全選択</button>
+          <button className="text-slate-500" onClick={() => setPdfCands(c => ({ ...c, items: c.items.map(i => ({ ...i, checked: false })) }))}>全解除</button>
+          <span className="ml-auto text-slate-500">{pdfCands.items.filter(i => i.checked).length} / {pdfCands.items.length} 件選択中</span>
+        </div>
+        <div className="overflow-y-auto flex-1 divide-y divide-slate-100">
+          {pdfCands.items.map((c, i) => (
+            <label key={i} className="flex items-center gap-2.5 px-4 py-2 hover:bg-blue-50/60 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4 accent-blue-600 shrink-0" checked={c.checked}
+                onChange={e => setPdfCands(pc => ({ ...pc, items: pc.items.map((x, j) => j === i ? { ...x, checked: e.target.checked } : x) }))} />
+              <span className="flex-1 min-w-0 text-sm text-slate-800 truncate font-bold">{c.productName}</span>
+              <span className="text-xs text-slate-500 tabular-nums shrink-0">{c.tais || 'TAIS未検出'}</span>
+              <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">{c.units ? `${c.units.toLocaleString()}単位` : '―'}</span>
+            </label>
+          ))}
+        </div>
+        <div className="p-3 border-t border-slate-200 flex flex-wrap gap-2">
+          <button className={`${btn('slate')} flex-1 justify-center`} onClick={() => { setPdfCands(null); setPendingDoc(null); }}>キャンセル</button>
+          {pendingDoc && settings.apiKey && (
+            <button className={`${btn('purple')} flex-1 justify-center`} title="抽出結果の精度が低い場合、AIでページ画像から読み取り直します"
+              onClick={() => { setPdfCands(null); aiReadPendingDoc(); }}>
+              <Wand2 size={15} /> AIで読み取り直す
+            </button>
+          )}
+          <button className={`${btn('indigo')} flex-[2] justify-center`} onClick={applyCandidates}>
+            <Plus size={16} /> 選択した商品を明細へ反映
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ---- 印刷プレビュー ----
+  const renderPrintOverlay = () => (
+    <div className="fixed inset-0 z-[60] bg-slate-700/90 overflow-y-auto no-print" onClick={closePrint}>
+      <div className="fixed top-3 right-3 z-[65] flex gap-2 no-print" onClick={e => e.stopPropagation()}>
+        <button className={btn('sky')} onClick={doPrint}><Printer size={16} /> 印刷</button>
+        <button className={btn('indigo')} onClick={savePdf}><FileDown size={16} /> PDF保存</button>
+        <button className={btn('rose')} onClick={closePrint}><X size={16} /> 閉じる</button>
+      </div>
+      <div className="py-8 no-print-preview" onClick={e => e.stopPropagation()}>
+        {/* 実体は #print-content-holder。ここではプレビュー表示指示のみ */}
+      </div>
+    </div>
+  );
+
+  // printOpen中は holder を画面に表示
+  useEffect(() => {
+    const holder = document.getElementById('print-content-holder');
+    if (printOpen) {
+      holder.style.display = 'block';
+      holder.style.position = 'relative';
+      holder.style.zIndex = '61';
+      holder.style.margin = '48px auto 24px';
+      holder.style.width = '210mm';
+      holder.style.maxWidth = '100%';
+    } else {
+      holder.style.display = '';
+      holder.style.position = '';
+      holder.style.zIndex = '';
+      holder.style.margin = '';
+      holder.style.width = '';
+      holder.style.maxWidth = '';
+    }
+  }, [printOpen]);
+
+  return (
+    <div>
+      {view === 'list' && renderList()}
+      {view === 'settings' && renderSettings()}
+      {view === 'edit' && report && renderEdit()}
+      {pdfCands && renderPdfCands()}
+      {printOpen && renderPrintOverlay()}
+      <BusyOverlay busy={busy} />
+      <Toast toast={toast} />
+
+      {/* 非表示のファイル入力 */}
+      <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden"
+        onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden"
+        onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
+      <input ref={pdfInputRef} type="file" accept="application/pdf" className="hidden"
+        onChange={e => { handlePdf(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+      <input ref={importInputRef} type="file" accept="application/json" className="hidden"
+        onChange={e => { importAll(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+    </div>
+  );
+}
+
+// デバッグ用フック（localStorageでフラグを立てた端末のみ公開）
+if (localStorage.getItem('taiyo_fukushi_debug') === '1') {
+  window.__debugPdf = { pdfToLines, parseCandidatesFromLines };
+}
+
+// エラー計測（QAチェック用）
+window.__appErrors = [];
+window.addEventListener('error', (e) => window.__appErrors.push(String(e.message)));
+window.addEventListener('unhandledrejection', (e) => window.__appErrors.push(String(e.reason)));
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
