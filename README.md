@@ -40,7 +40,8 @@ index.html         … 配布物（これだけ配ればよい）
 
 - 印刷HTMLへの挿入は全フィールド `escapeHTML` 済み。写真は `data:image/` 形式のみ許可
 - JSONインポートは構造・型を強制（`sanitizeImportedReport`）してから取込
-- pdf.js は `isEvalSupported:false` で CVE-2024-4367 を緩和（恒久対策は pdfjs-dist 4.x 更新）
+- pdf.js は **4.10.38**（CVE-2024-4367 修正済み版）。加えて `isEvalSupported:false` を多層防御として設定
+  - v4 では CMap 読み込みの戻り値が `{cMapData, isCompressed}` に変更（v3 の `compressionType` から）。`InlineCMapReaderFactory` はこれに準拠
 - APIキーは端末のlocalStorageに平文保存（設定画面に注意書きあり。共用PCでは使用後に消す運用）
 - 下書きは報告書ID別に保存。写真の実体削除は起動時GCに一本化（誤削除防止）
 - 特定福祉用具（販売品）は「価格（円）」として入力・印字され、貸与の合計単位数とは分離集計

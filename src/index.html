@@ -41,8 +41,8 @@ import {
   Plus, X, Sparkles, Download, Upload, FileUp, Loader2, ClipboardList,
   FileDown, Copy, CheckCircle2, AlertTriangle, FolderOpen, Wand2
 } from 'lucide-react';
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
-import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs';
 import Anthropic from '@anthropic-ai/sdk';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -296,7 +296,8 @@ class InlineCMapReaderFactory {
     const bin = atob(b64);
     const arr = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    return { cMapData: arr, compressionType: 1 /* BINARY(.bcmap) */ };
+    // pdf.js v4 の戻り値仕様: { cMapData, isCompressed }（v3の compressionType から変更）
+    return { cMapData: arr, isCompressed: true };
   }
 }
 
@@ -305,7 +306,7 @@ async function pdfToLines(arrayBuffer, onProgress) {
     data: arrayBuffer,
     CMapReaderFactory: InlineCMapReaderFactory,
     useWorkerFetch: false,
-    isEvalSupported: false, // CVE-2024-4367緩和: 細工PDFのFontMatrix経由の任意JS実行を無効化
+    isEvalSupported: false, // 多層防御: フォント処理でのeval相当の実行経路を無効化（CVE-2024-4367系の攻撃面を削減）
   }).promise;
   // spans: 座標つきテキスト片 {text, page, x, y}。
   // 多段組カタログでは行順の近さ≠視覚的な近さのため、座標を保持して空間探索に使う。
