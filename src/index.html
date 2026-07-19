@@ -13,14 +13,21 @@
     /* display:none方式: アプリ本体を印刷レイアウトから完全除外し（空白ページ防止）、
        プレビュー表示用のinlineスタイルにも !important で勝つ */
     body > *:not(#print-content-holder) { display: none !important; }
+    body { overflow: visible !important; }
+    /* プレビュー用のインラインスタイル（固定レイヤ・余白・スクロール）を打ち消す */
     #print-content-holder {
       display: block !important;
       position: static !important;
+      top: auto !important; left: auto !important; right: auto !important; bottom: auto !important;
       margin: 0 !important;
+      padding: 0 !important;
+      overflow: visible !important;
       width: 210mm !important;
       max-width: none !important;
       z-index: auto !important;
     }
+    /* プレビューの画面幅フィット用の縮小を印刷では無効化 */
+    #print-content-holder .doc { zoom: 1 !important; }
     .no-print { display: none !important; }
   }
 </style>
@@ -1510,8 +1517,11 @@ function App() {
 
   const savePdf = async () => {
     setBusy('PDFを生成中…（写真の枚数により数十秒かかります）');
+    const holder = document.getElementById('print-content-holder');
+    const docsAll = [...holder.querySelectorAll('.doc')];
+    const prevZooms = docsAll.map(d => d.style.zoom);
+    docsAll.forEach(d => { d.style.zoom = '1'; }); // 等倍で取り込む（画質低下を防ぐ）
     try {
-      const holder = document.getElementById('print-content-holder');
       const docs = holder.querySelectorAll('.doc');
       if (!docs.length) return;
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -1530,7 +1540,7 @@ function App() {
       showToast('PDFを保存しました（端末のダウンロードに保存されます）');
     } catch (err) {
       showToast(`PDF生成に失敗：${err.message}`, 'error');
-    } finally { setBusy(null); }
+    } finally { docsAll.forEach((d, i) => { d.style.zoom = prevZooms[i]; }); setBusy(null); }
   };
 
   // ---- データ移行（JSONエクスポート/インポート） ----
@@ -2006,23 +2016,44 @@ function App() {
   };
 
   // printOpen中は holder を画面に表示
+  // A4(210mm≒794px)が画面幅に収まるよう縮小率を決める（スマホでも全体が読める）
+  // 縮小は各A4ページに掛ける（固定レイヤ自体に掛けると画面を覆えなくなる）
+  const fitPreview = useCallback(() => {
+    const holder = document.getElementById('print-content-holder');
+    if (!holder) return;
+    const avail = Math.max(260, window.innerWidth - 20);
+    const z = String(Math.min(1, avail / 794));
+    holder.querySelectorAll('.doc').forEach(d => { d.style.zoom = z; });
+  }, []);
+
+  useEffect(() => {
+    if (!printOpen) return;
+    fitPreview();
+    window.addEventListener('resize', fitPreview);
+    return () => window.removeEventListener('resize', fitPreview);
+  }, [printOpen, fitPreview]);
+
   useEffect(() => {
     const holder = document.getElementById('print-content-holder');
+    const apply = (o) => Object.assign(holder.style, o);
     if (printOpen) {
-      holder.style.display = 'block';
-      holder.style.position = 'relative';
-      holder.style.zIndex = '61';
-      holder.style.margin = '48px auto 24px';
-      holder.style.width = '210mm';
-      holder.style.maxWidth = '100%';
+      // ビューポートを覆う固定レイヤにして、その中でA4ページをスクロール表示する。
+      // （通常フロー(position:relative)だと編集画面の高さ分だけ下にずれ、
+      //   プレビューが画面外になって「押しても何も見えない」状態になる）
+      apply({
+        display: 'block', position: 'fixed', top: '0', left: '0', right: '0', bottom: '0',
+        zIndex: '61', overflow: 'auto', padding: '58px 8px 24px', margin: '0',
+        width: 'auto', maxWidth: 'none',
+      });
+      document.body.style.overflow = 'hidden'; // 背面のスクロールを止める
     } else {
-      holder.style.display = '';
-      holder.style.position = '';
-      holder.style.zIndex = '';
-      holder.style.margin = '';
-      holder.style.width = '';
-      holder.style.maxWidth = '';
+      apply({
+        display: '', position: '', top: '', left: '', right: '', bottom: '',
+        zIndex: '', overflow: '', padding: '', margin: '', width: '', maxWidth: '', zoom: '',
+      });
+      document.body.style.overflow = '';
     }
+    return () => { document.body.style.overflow = ''; };
   }, [printOpen]);
 
   return (
