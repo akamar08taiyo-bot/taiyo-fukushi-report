@@ -742,7 +742,8 @@ const reportSummary = (report) => {
 
 // ===== 印刷帳票HTML生成（A4縦 / 明朝・ネイビーの企業文書） =====
 function buildPrintHTML(report, photoMap) {
-  const office = OFFICE_MASTER.find(o => o.name === report.office) || OFFICE_MASTER[0];
+  // 未選択のときに別営業所の情報を誤って印字しないよう、既定値へのフォールバックはしない
+  const office = OFFICE_MASTER.find(o => o.name === report.office) || null;
   const { rental, specific, units, sales } = reportSummary(report);
   const e = escapeHTML;
 
@@ -797,11 +798,14 @@ function buildPrintHTML(report, photoMap) {
         <div class="pgreet">平素より格別のお引き立てを賜り厚く御礼申し上げます。下記のとおりご報告申し上げます。</div>
       </div>
       <div class="phead-right">
-        <div class="pdate">報告日：${e(fmtDateJa(report.deliveryDate))}</div>
+        <div class="pdate">報告日：${e(fmtDateJa(report.deliveryDate) || '　　　年　月　日')}</div>
         <div class="pcompany">${e(COMPANY_NAME)}</div>
+        ${office ? `
         <div class="poffice">${e(office.name)}</div>
         <div class="paddr">〒${e(office.postal)}　${e(office.address)}</div>
-        <div class="paddr">TEL ${e(office.phone)}　FAX ${e(office.fax)}</div>
+        <div class="paddr">TEL ${e(office.phone)}　FAX ${e(office.fax)}</div>`
+        : `<div class="poffice pmissing">（営業所が未選択です）</div>
+        <div class="paddr">　</div><div class="paddr">　</div>`}
         <div class="pstaff">担当：${e(report.staff || '　　　　')}</div>
       </div>
     </div>
@@ -819,7 +823,7 @@ function buildPrintHTML(report, photoMap) {
   const headerCont = (pno) => `
     <div class="phead-cont">
       <span>福祉用具相談報告書　${e(report.clientName || '')}様邸</span>
-      <span>${e(COMPANY_NAME)}　${e(office.name)}</span>
+      <span>${e(COMPANY_NAME)}${office ? '　' + e(office.name) : ''}</span>
     </div>`;
 
   const pagesHTML = pages.map((pageSets, p) => {
@@ -868,6 +872,7 @@ function buildPrintHTML(report, photoMap) {
     #print-content-holder .poffice { font-weight: bold; font-size: 9.5pt; color: #1e40af; margin-bottom: 1mm; }
     #print-content-holder .paddr { font-size: 8pt; color: #4b5563; }
     #print-content-holder .pstaff { margin-top: 1.5mm; border-top: 1px solid #bfdbfe; padding-top: 1mm; }
+    #print-content-holder .pmissing { color: #c0392b; font-weight: bold; }
     #print-content-holder .psummary {
       display: flex; gap: 5mm; align-items: center; flex-wrap: wrap;
       background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 1.5mm;
@@ -1466,8 +1471,8 @@ function App() {
   };
 
   // ---- 印刷 / PDF ----
+  // 入力途中でもいつでもプレビューできる（未入力欄は空欄で表示される）
   const openPrint = async () => {
-    if (!report.office) { showToast('営業所を選択してください（帳票の発行元になります）', 'error'); return; }
     setBusy('帳票を作成中…');
     try {
       const map = await ensurePhotos(report.sets.map(s => s.photoId).filter(Boolean));
@@ -1943,18 +1948,32 @@ function App() {
   );
 
   // ---- 印刷プレビュー ----
-  const renderPrintOverlay = () => (
+  const renderPrintOverlay = () => {
+    // 未入力でもプレビューは開ける。提出前に気づけるよう不足項目だけ知らせる
+    const missing = [];
+    if (report && !report.clientName.trim()) missing.push('利用者名');
+    if (report && !report.office) missing.push('営業所');
+    if (report && !report.deliveryDate) missing.push('納品日');
+    return (
     <div className="fixed inset-0 z-[60] bg-slate-700/90 overflow-y-auto no-print" onClick={closePrint}>
       <div className="fixed top-3 right-3 z-[65] flex gap-2 no-print" onClick={e => e.stopPropagation()}>
         <button className={btn('sky')} onClick={doPrint}><Printer size={16} /> 印刷</button>
         <button className={btn('indigo')} onClick={savePdf}><FileDown size={16} /> PDF保存</button>
         <button className={btn('rose')} onClick={closePrint}><X size={16} /> 閉じる</button>
       </div>
+      {missing.length > 0 && (
+        <div className="fixed top-3 left-3 z-[65] no-print bg-amber-50 border border-amber-400 text-amber-800 rounded-md px-3 py-2 text-xs font-bold shadow-lg max-w-[45vw]"
+          onClick={e => e.stopPropagation()}>
+          <div className="flex items-center gap-1.5"><AlertTriangle size={14} className="shrink-0" />未入力：{missing.join('・')}</div>
+          <div className="font-normal mt-0.5">プレビューはこのまま確認できます（提出前にご入力ください）</div>
+        </div>
+      )}
       <div className="py-8 no-print-preview" onClick={e => e.stopPropagation()}>
         {/* 実体は #print-content-holder。ここではプレビュー表示指示のみ */}
       </div>
     </div>
-  );
+    );
+  };
 
   // printOpen中は holder を画面に表示
   useEffect(() => {
