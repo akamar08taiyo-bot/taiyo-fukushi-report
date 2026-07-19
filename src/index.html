@@ -100,10 +100,18 @@ const SELECTABLE_ITEMS = [
   '固定用スロープ', '歩行器（歩行車を除く）', '単点杖（松葉づえを除く）・多点杖',
 ];
 const CATEGORY_RENTAL = '福祉用具貸与';
+const CATEGORY_PREVENTION = '介護予防福祉用具貸与'; // 要支援者向け（報告書の「予防○○貸与」）
 const CATEGORY_SPECIFIC = '特定福祉用具';
-const CATEGORIES = [CATEGORY_RENTAL, CATEGORY_SPECIFIC];
+const CATEGORIES = [CATEGORY_RENTAL, CATEGORY_PREVENTION, CATEGORY_SPECIFIC];
+const RENTAL_CATEGORIES = [CATEGORY_RENTAL, CATEGORY_PREVENTION]; // 単位数で集計する区分
+// 画面のプルダウン用の短縮表記（スマホで横幅を取らないように）
+const CATEGORY_SHORT = {
+  [CATEGORY_RENTAL]: '貸与',
+  [CATEGORY_PREVENTION]: '予防貸与',
+  [CATEGORY_SPECIFIC]: '特定販売',
+};
 
-const REPORT_TYPES = ['納品', 'モニタリング', '入替・変更', '引き取り', '相談', 'デモ機貸出'];
+const REPORT_TYPES = ['納品', 'モニタリング', '入替・変更', '相談', 'デモ機貸出'];
 
 // 報告事項の定型文（タップで挿入）
 const TEMPLATE_PHRASES = [
@@ -385,6 +393,86 @@ const stripNoise = (line) => line
   .replace(/[A-Za-z0-9][A-Za-z0-9\-]{2,}/g, ' ')
   .replace(/\s+/g, ' ').trim();
 
+// ===== レンタル単位数報告書（表形式）専用パーサ =====
+// 実物様式は「1商品 = 3行ブロック」:
+//   [種目行] 予防手すり貸与                     01265-000055
+//   [商品行] たよレールN 2型 │納品│1│2,260│半月│1,130│11│113│31│226│
+//   [日付行] 2026年07月21日　～
+// 列見出しは … 区分│料金│日数│単位数│日数│単位数 で、
+// 手前の単位数は日割り、**最後の単位数が月額**（226/400）。
+const KUBUN_RE = /^(納品|引取|引き取り|継続|変更|中止|交換|再貸与|開始|終了)$/;
+const NUM_ONLY_RE = /^[\d,]+$/;
+
+// 種目名 → 標準品目名＋区分（「予防手すり貸与」→ 手すり／介護予防福祉用具貸与）
+function normalizeItemLabel(label) {
+  let s = String(label || '').replace(/[\s　]/g, '');
+  if (!s) return null;
+  const isPrev = /^(介護予防|予防)/.test(s);
+  const isSale = /(販売|購入)/.test(s);
+  s = s.replace(/^(介護予防|予防)/, '').replace(/(貸与|販売|購入)$/, '');
+  const pool = isSale ? [...SPECIFIC_ITEMS, ...SELECTABLE_ITEMS] : RENTAL_ITEMS;
+  const hit = pool.find(it => it === s) || pool.find(it => it.startsWith(s) || s.startsWith(it));
+  return {
+    item: hit || s,
+    category: isSale ? CATEGORY_SPECIFIC : (isPrev ? CATEGORY_PREVENTION : CATEGORY_RENTAL),
+  };
+}
+
+function parseRentalUnitReport(spans) {
+  // 同一y座標＝同一視覚行としてまとめ、ページ順・上から下へ並べる
+  const rowMap = new Map();
+  for (const sp of spans) {
+    const key = sp.page + ':' + sp.y;
+    if (!rowMap.has(key)) rowMap.set(key, { page: sp.page, y: sp.y, items: [] });
+    rowMap.get(key).items.push(sp);
+  }
+  const rows = [...rowMap.values()]
+    .map(r => ({ page: r.page, y: r.y, items: r.items.slice().sort((a, b) => a.x - b.x) }))
+    .sort((a, b) => a.page - b.page || b.y - a.y);
+
+  const cands = [];
+  for (let i = 0; i < rows.length; i++) {
+    const texts = rows[i].items.map(s => s.text);
+    const tm = texts.join(' ').match(TAIS_RE);
+    if (!tm) continue;
+    // 種目行の判定: TAISを除いた文字列に「○○貸与/販売」があること
+    const label = texts.map(t => t.replace(TAIS_RE, '')).join('').replace(/[\s　]/g, '').trim();
+    if (!/(貸与|販売|購入)/.test(label)) continue;
+    const norm = normalizeItemLabel(label);
+    if (!norm) continue;
+
+    // 直下の行を商品行とみなす（同一ページ・行間が離れすぎていないこと）
+    const next = rows[i + 1];
+    if (!next || next.page !== rows[i].page || (rows[i].y - next.y) > 40) continue;
+
+    // 商品名 = 先頭から「区分 or 数値」が現れる直前まで
+    const nameParts = [], dataParts = [];
+    let hitData = false;
+    for (const it of next.items) {
+      const t = it.text.trim();
+      if (!hitData && (KUBUN_RE.test(t) || NUM_ONLY_RE.test(t))) hitData = true;
+      (hitData ? dataParts : nameParts).push(t);
+    }
+    const productName = nameParts.join(' ').replace(/\s+/g, ' ').trim();
+    if (!productName) continue;
+
+    const nums = dataParts.filter(t => NUM_ONLY_RE.test(t));
+    const units = nums.length ? toInt(nums[nums.length - 1]) : 0; // 最後の数値＝月額単位数
+    const kubun = (dataParts.find(t => KUBUN_RE.test(t)) || '').replace('引き取り', '引取');
+
+    cands.push({
+      productName: productName.slice(0, 60),
+      maker: '',                       // メーカー名は取得しない（不要との運用方針）
+      tais: `${tm[1]}-${tm[2]}`,
+      units,
+      item: norm.item,
+      category: norm.category,
+      kubun,
+    });
+  }
+  return cands;
+}
+
 // TAISコード・単位数の出現位置から、空間的（同ページ・同カラム・近傍）に
 // 商品名を探索して候補を組み立てる。表形式の単位数報告書は同一行から直接取れる。
 function parseCandidatesFromLines(spans) {
@@ -644,10 +732,10 @@ const emptyReport = (settings) => ({
 
 // 数値欄の意味は区分で異なる: 貸与=レンタル単位数、特定福祉用具(販売)=価格(円)
 const reportSummary = (report) => {
-  const rental = report.sets.filter(s => s.category === CATEGORY_RENTAL).length;
+  const rental = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).length;
   const specific = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).length;
   const amt = (s) => toInt(s.units) * Math.max(1, toInt(s.qty) || 1);
-  const units = report.sets.filter(s => s.category === CATEGORY_RENTAL).reduce((sum, s) => sum + amt(s), 0);
+  const units = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).reduce((sum, s) => sum + amt(s), 0);
   const sales = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((sum, s) => sum + amt(s), 0);
   return { rental, specific, units, sales };
 };
@@ -662,7 +750,9 @@ function buildPrintHTML(report, photoMap) {
     const rawPhoto = s.photoId ? photoMap[s.photoId] : null;
     // XSS対策: dataURL画像形式のみ許可（インポートJSON等で混入した不正値を排除）
     const photo = (typeof rawPhoto === 'string' && /^data:image\//.test(rawPhoto)) ? rawPhoto : null;
-    const catShort = s.category === CATEGORY_RENTAL ? '貸与' : s.category === CATEGORY_SPECIFIC ? '特定' : '';
+    const catShort = s.category === CATEGORY_RENTAL ? '貸与'
+      : s.category === CATEGORY_PREVENTION ? '予防貸与'
+      : s.category === CATEGORY_SPECIFIC ? '特定' : '';
     const isSale = s.category === CATEGORY_SPECIFIC; // 販売品の数値は単位数ではなく価格(円)
     const num = toInt(s.units);
     const unitsDisp = num ? (isSale ? `¥${num.toLocaleString()}` : `${num.toLocaleString()} 単位`) : '―';
@@ -702,7 +792,8 @@ function buildPrintHTML(report, photoMap) {
       <div class="phead-left">
         <div class="ptitle">福祉用具相談報告書</div>
         <div class="pclient">${e(report.clientName || '　　　　')}<span class="pclient-suffix">様邸</span></div>
-        <div class="pcm">担当ケアマネジャー：${e(report.careManager || '―')}${report.cmOffice ? `　様（${e(report.cmOffice)}）` : '　様'}</div>
+        ${report.cmOffice ? `<div class="pcm-office">${e(report.cmOffice)}</div>` : ''}
+        <div class="pcm">担当ケアマネジャー　${e(report.careManager || '　　　　')}　様</div>
         <div class="pgreet">平素より格別のお引き立てを賜り厚く御礼申し上げます。下記のとおりご報告申し上げます。</div>
       </div>
       <div class="phead-right">
@@ -765,7 +856,8 @@ function buildPrintHTML(report, photoMap) {
     }
     #print-content-holder .pclient { font-size: 15pt; font-weight: bold; margin-bottom: 1mm; overflow-wrap: anywhere; }
     #print-content-holder .pclient-suffix { font-size: 10.5pt; color: #2563eb; margin-left: 2mm; }
-    #print-content-holder .pcm { font-size: 10pt; color: #1f2937; margin-bottom: 2mm; }
+    #print-content-holder .pcm-office { font-size: 10.5pt; color: #1f2937; overflow-wrap: anywhere; }
+    #print-content-holder .pcm { font-size: 10pt; color: #1f2937; margin-bottom: 2mm; padding-left: 3mm; }
     #print-content-holder .pgreet { font-size: 8.5pt; color: #4b5563; }
     #print-content-holder .phead-right {
       width: 68mm; flex-shrink: 0; font-size: 8.5pt; color: #1f2937;
@@ -884,11 +976,15 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
         <span className="w-6 h-6 rounded bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
         <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white font-bold"
           value={s.category} onChange={e => onUpdate(s.id, { category: e.target.value, item: '' })}>
-          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_SHORT[c] || c}</option>)}
         </select>
         <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white flex-1 min-w-0"
           value={s.item} onChange={e => onUpdate(s.id, { item: e.target.value })}>
           <option value="">品目を選択…</option>
+          {/* PDF取込で標準種目に一致しなかった値も保持して表示する */}
+          {s.item && ![...RENTAL_ITEMS, ...SPECIFIC_ITEMS, ...SELECTABLE_ITEMS].includes(s.item) && (
+            <option value={s.item}>{s.item}</option>
+          )}
           {isSale ? (
             <>
               <optgroup label="特定福祉用具販売">
@@ -1125,7 +1221,11 @@ function App() {
     setMaster(m => upsertMaster(m, rep.sets));
     setDrafts(ds => { const n = { ...ds }; delete n[rep.id]; return n; });
     openSnapshotRef.current = JSON.stringify(rep);
-    showToast('保存しました（商品マスタにも学習済み）');
+    // 担当者・営業所は次回の新規作成に自動で入るよう記憶（毎回の入力を不要にする）
+    if (rep.staff !== settings.staff || rep.office !== settings.office) {
+      setSettings(s => ({ ...s, staff: rep.staff || s.staff, office: rep.office || s.office }));
+    }
+    showToast('保存しました（担当者・営業所は次回から自動入力されます）');
   };
 
   const deleteReport = (r) => {
@@ -1279,14 +1379,21 @@ function App() {
     try {
       const buf = await file.arrayBuffer();
       const { spans, doc } = await pdfToLines(buf, setBusy);
-      const cands = parseCandidatesFromLines(spans);
+      // ① レンタル単位数報告書（表形式）として解釈 → ② 該当なければカタログとして解釈
+      let cands = parseRentalUnitReport(spans);
+      let kind = '単位数報告書';
+      if (!cands.length) { cands = parseCandidatesFromLines(spans); kind = 'カタログ'; }
       if (cands.length) {
         setPendingDoc({ name: file.name, doc }); // 「AIで読み取り直す」用に保持
+        const delivered = cands.filter(c => c.kubun === '納品').length;
         setPdfCands({
-          source: file.name,
-          items: cands.map(c => ({ ...c, maker: c.maker || '', checked: true })),
+          source: `${file.name}（${kind}として読み取り）`,
+          // 区分が判る様式では「納品」のみ既定でON（他は残すがOFF）
+          items: cands.map(c => ({ ...c, maker: c.maker || '', checked: c.kubun ? c.kubun === '納品' : true })),
         });
-        showToast(`${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
+        showToast(delivered
+          ? `${cands.length}件を抽出しました（うち納品${delivered}件を選択済み）`
+          : `${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
       } else {
         // テキストが取れない（スキャンPDF等）→ AI読み取りを提案
         setPendingDoc({ name: file.name, doc });
@@ -1336,13 +1443,19 @@ function App() {
             ...sets[i],
             productName: c.productName, maker: c.maker || sets[i].maker,
             tais: c.tais || sets[i].tais,
+            item: c.item || sets[i].item,
+            category: c.category || sets[i].category,
             units: toInt(sets[i].units) ? sets[i].units : (c.units ? String(c.units) : sets[i].units),
           };
         }
       }
       // 2) 余りは新規カード
       for (const c of queue) {
-        sets.push({ ...emptySet(), productName: c.productName, maker: c.maker || '', tais: c.tais || '', units: c.units ? String(c.units) : '' });
+        sets.push({
+          ...emptySet(), productName: c.productName, maker: c.maker || '', tais: c.tais || '',
+          item: c.item || '', category: c.category || CATEGORY_RENTAL,
+          units: c.units ? String(c.units) : '',
+        });
       }
       return { ...r, updatedAt: Date.now(), sets };
     });
@@ -1655,14 +1768,14 @@ function App() {
               </select>
             </div>
             <div>
-              <label className={labelCls}>担当ケアマネジャー</label>
-              <input className={inputCls} value={report.careManager} placeholder="例：佐藤 一郎"
-                onChange={e => updateReport({ careManager: e.target.value })} />
-            </div>
-            <div>
               <label className={labelCls}>居宅介護支援事業所</label>
               <input className={inputCls} value={report.cmOffice} placeholder="例：○○ケアプランセンター"
                 onChange={e => updateReport({ cmOffice: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>担当ケアマネジャー</label>
+              <input className={inputCls} value={report.careManager} placeholder="例：佐藤 一郎"
+                onChange={e => updateReport({ careManager: e.target.value })} />
             </div>
             <div>
               <label className={labelCls}>担当者（自社）</label>
@@ -1797,9 +1910,19 @@ function App() {
             <label key={i} className="flex items-center gap-2.5 px-4 py-2 hover:bg-blue-50/60 cursor-pointer">
               <input type="checkbox" className="w-4 h-4 accent-blue-600 shrink-0" checked={c.checked}
                 onChange={e => setPdfCands(pc => ({ ...pc, items: pc.items.map((x, j) => j === i ? { ...x, checked: e.target.checked } : x) }))} />
-              <span className="flex-1 min-w-0 text-sm text-slate-800 truncate font-bold">{c.productName}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  {c.kubun && (
+                    <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 shrink-0 ${c.kubun === '納品' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{c.kubun}</span>
+                  )}
+                  <span className="text-sm text-slate-800 truncate font-bold">{c.productName}</span>
+                </div>
+                {c.item && <div className="text-[11px] text-slate-500 truncate">{c.category === CATEGORY_PREVENTION ? '予防・' : c.category === CATEGORY_SPECIFIC ? '特定・' : ''}{c.item}</div>}
+              </div>
               <span className="text-xs text-slate-500 tabular-nums shrink-0">{c.tais || 'TAIS未検出'}</span>
-              <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">{c.units ? `${c.units.toLocaleString()}単位` : '―'}</span>
+              <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">
+                {c.units ? (c.category === CATEGORY_SPECIFIC ? `¥${c.units.toLocaleString()}` : `${c.units.toLocaleString()}単位`) : '―'}
+              </span>
             </label>
           ))}
         </div>
@@ -1878,7 +2001,7 @@ function App() {
 
 // デバッグ用フック（localStorageでフラグを立てた端末のみ公開）
 if (localStorage.getItem('taiyo_fukushi_debug') === '1') {
-  window.__debugPdf = { pdfToLines, parseCandidatesFromLines };
+  window.__debugPdf = { pdfToLines, parseCandidatesFromLines, parseRentalUnitReport, normalizeItemLabel };
 }
 
 // エラー計測（QAチェック用）
