@@ -460,20 +460,26 @@ function parseRentalUnitReport(spans) {
     const next = rows[i + 1];
     if (!next || next.page !== rows[i].page || (rows[i].y - next.y) > 40) continue;
 
-    // 商品名 = 先頭から「区分 or 数値」が現れる直前まで
-    const nameParts = [], dataParts = [];
-    let hitData = false;
-    for (const it of next.items) {
-      const t = it.text.trim();
-      if (!hitData && (KUBUN_RE.test(t) || NUM_ONLY_RE.test(t))) hitData = true;
-      (hitData ? dataParts : nameParts).push(t);
+    // 商品行は「商品名＋数値列」。PDFによっては列が1つのテキストとして繋がって
+    // 取得されるため、span単位ではなく**文字列**として切り分ける。
+    const rowText = next.items.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+
+    // 区分（納品/引取…）の位置で切る。区分が無ければ「独立した数値」の位置で切る
+    // （「2型」のように数字が商品名に含まれる場合を誤検出しないよう、前後が区切りの数値のみ対象）
+    let cut = -1;
+    const km = rowText.match(/(納品|引取|引き取り|継続|変更|中止|交換|再貸与)/);
+    if (km) cut = km.index;
+    if (cut < 0) {
+      const nm = rowText.match(/(?:^|\s)\d[\d,]*(?=\s|$)/);
+      if (nm) cut = nm.index;
     }
-    const productName = nameParts.join(' ').replace(/\s+/g, ' ').trim();
+    const productName = (cut >= 0 ? rowText.slice(0, cut) : rowText).trim();
     if (!productName) continue;
 
-    const nums = dataParts.filter(t => NUM_ONLY_RE.test(t));
+    const dataText = cut >= 0 ? rowText.slice(cut) : '';
+    const nums = dataText.match(/\d[\d,]*/g) || [];
     const units = nums.length ? toInt(nums[nums.length - 1]) : 0; // 最後の数値＝月額単位数
-    const kubun = (dataParts.find(t => KUBUN_RE.test(t)) || '').replace('引き取り', '引取');
+    const kubun = (km ? km[1] : '').replace('引き取り', '引取');
 
     cands.push({
       productName: productName.slice(0, 60),
