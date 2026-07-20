@@ -787,7 +787,7 @@ function buildPrintHTML(report, photoMap) {
       <div class="pcap">
         <div class="pcap-row1"><span class="pbadge">${idx + 1}</span><span class="pplace">納品箇所：${e(s.place || '（箇所未設定）')}</span></div>
         <div class="pcap-row2">${catShort ? `［${catShort}］` : ''}${e(s.item || '（品目未設定）')}${qty > 1 ? `　×${qty}` : ''}</div>
-        <div class="pcap-row3">${e(s.productName || '')}${s.maker ? `（${e(s.maker)}）` : ''}</div>
+        <div class="pcap-row3">${e(s.productName || '')}</div>
         <div class="pcap-row4"><span>TAIS：${e(s.tais || '―')}</span><span>${isSale ? '価格' : '単位数'}：${unitsDisp}</span></div>
         ${s.note ? `<div class="pcap-note">${e(s.note)}</div>` : ''}
       </div>
@@ -994,8 +994,18 @@ function BusyOverlay({ busy }) {
 // ===== 明細カード =====
 // React.memo: 利用者名や報告事項の入力中に全カード（写真img込み）が
 // 再レンダーされるのを防ぐ。propsのコールバックは親側で参照安定化済み。
-const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch }) {
+const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch, onDropFiles }) {
   const isSale = s.category === CATEGORY_SPECIFIC; // 販売品は単位数ではなく価格(円)
+  const [over, setOver] = useState(false);
+  // このカードに直接ドロップされた写真は、このカードに添付する
+  const dropProps = {
+    onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); setOver(true); },
+    onDragLeave: (e) => { e.stopPropagation(); setOver(false); },
+    onDrop: (e) => {
+      e.preventDefault(); e.stopPropagation(); setOver(false);
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onDropFiles(e.dataTransfer.files, s.id);
+    },
+  };
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border-b border-slate-200">
@@ -1026,7 +1036,7 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
       </div>
 
       <div className="flex gap-2.5 p-2.5">
-        <div className="w-28 shrink-0">
+        <div className={`w-28 shrink-0 rounded-md ${over ? 'ring-2 ring-emerald-500' : ''}`} {...dropProps}>
           {s.photoId && photo ? (
             <div className="relative">
               <img src={photo} alt="" className="w-28 h-28 object-cover rounded-md border border-slate-200" />
@@ -1039,9 +1049,11 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
             </div>
           ) : (
             <button
-              className="w-28 h-28 border-2 border-dashed border-slate-300 rounded-md flex flex-col items-center justify-center text-slate-400 hover:border-blue-400 hover:text-blue-500 text-[10px] gap-1"
+              className={`w-28 h-28 border-2 border-dashed rounded-md flex flex-col items-center justify-center text-[10px] gap-1 transition
+                ${over ? 'border-emerald-500 text-emerald-600 bg-emerald-50' : 'border-slate-300 text-slate-400 hover:border-blue-400 hover:text-blue-500'}`}
               onClick={() => onAttach(s.id)}>
-              <ImagePlus size={20} /> 写真を添付
+              <ImagePlus size={20} /> {over ? 'ここに追加' : '写真を添付'}
+              <span className="text-[9px] text-slate-400">ドロップ可</span>
             </button>
           )}
           {AI_ENABLED && s.photoId && (
@@ -1058,15 +1070,11 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
               onChange={e => onUpdate(s.id, { productName: e.target.value })}
               onBlur={e => e.target.value && onMasterMatch(s.id, e.target.value)} />
           </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            <input className={inputCls} value={s.maker} placeholder="メーカー"
-              onChange={e => onUpdate(s.id, { maker: e.target.value })} />
-            <select className={inputCls} value={s.place}
-              onChange={e => onUpdate(s.id, { place: e.target.value })}>
-              <option value="">納品箇所…</option>
-              {PLACES.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-          </div>
+          <select className={inputCls} value={s.place}
+            onChange={e => onUpdate(s.id, { place: e.target.value })}>
+            <option value="">納品箇所…</option>
+            {PLACES.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
             <input className={`${inputCls} col-span-2 md:col-span-1 tabular-nums`} inputMode="numeric" value={s.tais} placeholder="TAISコード"
               onChange={e => onUpdate(s.id, { tais: e.target.value })}
@@ -1107,10 +1115,13 @@ function App() {
   const [busy, setBusy] = useState(null);
   const [toast, setToast] = useState(null);
   const [printOpen, setPrintOpen] = useState(false);
+  const [dropOver, setDropOver] = useState(false); // 編集画面全体への写真ドロップ
+  const dragDepth = useRef(0);
   const [pdfCands, setPdfCands] = useState(null); // {source, items:[{productName,maker,tais,units,checked}]}
   const [pendingDoc, setPendingDoc] = useState(null); // スキャンPDFのAI読み取り待ち
   const toastTimer = useRef(null);
   const draftTimer = useRef(null);
+  const handleFilesRef = useRef(null); // ドロップ経路から最新のhandleFilesを呼ぶため
   const openSnapshotRef = useRef(null); // 開いた時点のJSON（一致する間はドラフト化しない）
   const prevViewRef = useRef('list');   // 設定画面から戻る先
   const fileInputRef = useRef(null);
@@ -1277,6 +1288,7 @@ function App() {
   };
 
   // ---- 写真添付 ----
+  // 写真の取り込み（ファイル選択・カメラ・ドラッグ＆ドロップ共通）
   const handleFiles = async (files, targetSetId) => {
     const list = Array.from(files || []).filter(f => f.type.startsWith('image/'));
     if (!list.length) return;
@@ -1388,6 +1400,7 @@ function App() {
   };
 
   // ---- SetCard(React.memo)へ渡す安定コールバック（最新の実装はrefで参照） ----
+  handleFilesRef.current = handleFiles;
   const recognizeOneRef = useRef(null);
   recognizeOneRef.current = recognizeOne;
   const onRecognizeStable = useCallback((s) => { recognizeOneRef.current && recognizeOneRef.current(s); }, []);
@@ -1397,6 +1410,9 @@ function App() {
   const onAttachStable = useCallback((setId) => {
     attachTargetRef.current = setId;
     if (fileInputRef.current) fileInputRef.current.click();
+  }, []);
+  const onDropFilesStable = useCallback((files, setId) => {
+    if (handleFilesRef.current) handleFilesRef.current(files, setId);
   }, []);
 
   // ---- レンタル単位数報告書（PDF）取込 ----
@@ -1772,8 +1788,27 @@ function App() {
 
   // ---- 編集 ----
   const renderEdit = () => {
+    // 画面のどこにドロップしても写真を追加できる（カード上にドロップした場合はそのカードへ）
+    const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    const pageDrop = {
+      onDragEnter: (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth.current++; setDropOver(true); },
+      onDragOver: (e) => { if (!hasFiles(e)) return; e.preventDefault(); },
+      onDragLeave: (e) => { if (!hasFiles(e)) return; dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDropOver(false); },
+      onDrop: (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault(); dragDepth.current = 0; setDropOver(false);
+        if (e.dataTransfer.files && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files, null);
+      },
+    };
     return (
-      <div className="max-w-4xl mx-auto p-3 md:p-4 pb-36">
+      <div className="max-w-4xl mx-auto p-3 md:p-4 pb-36 relative" {...pageDrop}>
+        {dropOver && (
+          <div className="fixed inset-0 z-50 bg-emerald-600/15 border-4 border-dashed border-emerald-500 flex items-center justify-center pointer-events-none">
+            <div className="bg-white rounded-xl shadow-xl px-6 py-4 text-emerald-700 font-bold flex items-center gap-2">
+              <ImagePlus size={22} /> ここに写真をドロップして追加
+            </div>
+          </div>
+        )}
         <header className="flex items-center gap-2 py-3">
           <button className="text-slate-500 hover:text-slate-800 p-1.5"
             onClick={() => { setView('list'); }}><ArrowLeft size={20} /></button>
@@ -1888,6 +1923,7 @@ function App() {
               onRecognize={onRecognizeStable}
               onAttach={onAttachStable}
               onMasterMatch={onMasterMatchStable}
+              onDropFiles={onDropFilesStable}
             />
           ))}
 
