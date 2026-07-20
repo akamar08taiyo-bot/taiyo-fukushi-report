@@ -415,8 +415,8 @@ const stripNoise = (line) => line
 //   [日付行] 2026年07月21日　～
 // 列見出しは … 区分│料金│日数│単位数│日数│単位数 で、
 // 手前の単位数は日割り、**最後の単位数が月額**（226/400）。
-const KUBUN_RE = /^(納品|引取|引き取り|継続|変更|中止|交換|再貸与|開始|終了)$/;
-const NUM_ONLY_RE = /^[\d,]+$/;
+// 区分（状態）の語。長い語を先に並べる（解約済→解約、引き取り→引取 の順で判定するため）
+const KUBUN_RE = /(納品|引き取り|引取|解約済|解約|返却|撤去|継続|変更|中止|交換|再貸与|開始|終了)/;
 
 // 種目名 → 標準品目名＋区分（「予防手すり貸与」→ 手すり／介護予防福祉用具貸与）
 function normalizeItemLabel(label) {
@@ -467,7 +467,7 @@ function parseRentalUnitReport(spans) {
     // 区分（納品/引取…）の位置で切る。区分が無ければ「独立した数値」の位置で切る
     // （「2型」のように数字が商品名に含まれる場合を誤検出しないよう、前後が区切りの数値のみ対象）
     let cut = -1;
-    const km = rowText.match(/(納品|引取|引き取り|継続|変更|中止|交換|再貸与)/);
+    const km = rowText.match(KUBUN_RE);
     if (km) cut = km.index;
     if (cut < 0) {
       const nm = rowText.match(/(?:^|\s)\d[\d,]*(?=\s|$)/);
@@ -479,7 +479,7 @@ function parseRentalUnitReport(spans) {
     const dataText = cut >= 0 ? rowText.slice(cut) : '';
     const nums = dataText.match(/\d[\d,]*/g) || [];
     const units = nums.length ? toInt(nums[nums.length - 1]) : 0; // 最後の数値＝月額単位数
-    const kubun = (km ? km[1] : '').replace('引き取り', '引取');
+    const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
 
     cands.push({
       productName: productName.slice(0, 60),
@@ -1416,11 +1416,15 @@ function App() {
         const delivered = cands.filter(c => c.kubun === '納品').length;
         setPdfCands({
           source: `${file.name}（${kind}として読み取り）`,
-          // 区分が判る様式では「納品」のみ既定でON（他は残すがOFF）
-          items: cands.map(c => ({ ...c, maker: c.maker || '', checked: c.kubun ? c.kubun === '納品' : true })),
+          // 単位数報告書は「納品」のみ既定でON（解約・引取などは一覧に残すがOFF）。
+          // カタログは区分の概念が無いので従来どおり全選択。
+          items: cands.map(c => ({
+            ...c, maker: c.maker || '',
+            checked: kind === '単位数報告書' ? c.kubun === '納品' : true,
+          })),
         });
-        showToast(delivered
-          ? `${cands.length}件を抽出しました（うち納品${delivered}件を選択済み）`
+        showToast(kind === '単位数報告書'
+          ? `${cands.length}件を抽出しました（納品${delivered}件を選択済み。他は必要に応じてチェックしてください）`
           : `${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
       } else {
         // テキストが取れない（スキャンPDF等）→ AI読み取りを提案
