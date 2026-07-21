@@ -47,10 +47,11 @@ import {
   ArrowLeft, Camera, ImagePlus, FileText, Printer, Save, Settings, Trash2,
   Plus, X, Sparkles, Download, Upload, FileUp, Loader2, ClipboardList,
   FileDown, Copy, CheckCircle2, AlertTriangle, FolderOpen, Wand2,
-  BookOpen, PackagePlus
+  BookOpen, PackagePlus, HelpCircle, ChevronRight, ChevronUp, ChevronDown
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs';
+import { unzipSync, strFromU8 } from 'fflate';
 import Anthropic from '@anthropic-ai/sdk';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -212,6 +213,18 @@ const sanitizeImportedReport = (r) => ({
   reportType: REPORT_TYPES.includes(r && r.reportType) ? r.reportType : '納品',
   remarks: sanStr(r && r.remarks, 4000),
   sets: Array.isArray(r && r.sets) ? r.sets.slice(0, 100).map(sanitizeImportedSet) : [],
+  showTotal: !!(r && r.showTotal),
+  showImportTable: r && r.showImportTable !== undefined ? !!r.showImportTable : true,
+  highlightDelivered: r && r.highlightDelivered !== undefined ? !!r.highlightDelivered : true,
+  importSource: sanStr(r && r.importSource, 120),
+  importedRows: Array.isArray(r && r.importedRows) ? r.importedRows.slice(0, 300).map(x => ({
+    productName: sanStr(x && x.productName, 120),
+    tais: sanStr(x && x.tais, 20),
+    units: toInt(x && x.units),
+    kubun: sanStr(x && x.kubun, 12),
+    item: sanStr(x && x.item, 60),
+    category: CATEGORIES.includes(x && x.category) ? x.category : '',
+  })) : [],
   updatedAt: toInt(r && r.updatedAt) || Date.now(),
 });
 
@@ -379,6 +392,7 @@ const TAIS_RE = /(\d{5})\s*-\s*(\d{6})/;
 const UNITS_RE = /([1-9][\d,]{0,6})\s*単位/;
 const HAS_JA_RE = /[ぁ-んァ-ヶ一-龠ー]{3,}/; // 日本語3文字以上（型番・英数トークンを商品名から除外）
 const PRICE_RE = /[￥¥]?\d{1,3}(?:,\d{3})+/;  // カンマ区切りの価格らしき数値
+const NUM_LIKE_RE = /^[¥￥]?[\d,]+$/;         // 数値だけのセル（Excel/CSVの列判定用）
 
 const NOISE_WORD_RE = /[￥¥●／：]|税抜|税込|非課税|軽減|価格|在庫商品|受注生産|替えゴム|パイプ径|生産国|材質|重さ|サイズ|展開|注文|お問合せ|型番|ワイズ|片足|両足|脚部|グリップ内径|セット内容|最大使用者/;
 
@@ -432,6 +446,175 @@ function normalizeItemLabel(label) {
     item: hit || s,
     category: isSale ? CATEGORY_SPECIFIC : (isPrev ? CATEGORY_PREVENTION : CATEGORY_RENTAL),
   };
+}
+
+// ===== Excel(.xlsx) / CSV の読み取り =====
+// xlsxはZIP+XML。SheetJS(約1MB)は重いので、解凍(fflate)＋DOMParserで必要最小限だけ読む。
+const colToIndex = (ref) => {
+  const m = String(ref || '').match(/^([A-Z]+)/);
+  if (!m) return 0;
+  let n = 0;
+  for (const ch of m[1]) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n - 1;
+};
+
+function xlsxToRows(arrayBuffer) {
+  const files = unzipSync(new Uint8Array(arrayBuffer));
+  const parse = (xml) => new DOMParser().parseFromString(xml, 'application/xml');
+  // 共有文字列
+  const shared = [];
+  if (files['xl/sharedStrings.xml']) {
+    const doc = parse(strFromU8(files['xl/sharedStrings.xml']));
+    for (const si of doc.getElementsByTagName('si')) {
+      // <si>直下の<t>を連結（書式分割されている場合がある）
+      shared.push([...si.getElementsByTagName('t')].map(t => t.textContent).join(''));
+    }
+  }
+  // 最初のワークシート
+  const sheetName = Object.keys(files).find(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+  if (!sheetName) return [];
+  const doc = parse(strFromU8(files[sheetName]));
+  const rows = [];
+  for (const row of doc.getElementsByTagName('row')) {
+    const cells = [];
+    for (const c of row.getElementsByTagName('c')) {
+      const idx = colToIndex(c.getAttribute('r'));
+      const type = c.getAttribute('t');
+      let val = '';
+      if (type === 'inlineStr') {
+        val = [...c.getElementsByTagName('t')].map(t => t.textContent).join('');
+      } else {
+        const v = c.getElementsByTagName('v')[0];
+        const raw = v ? v.textContent : '';
+        val = type === 's' ? (shared[Number(raw)] ?? '') : raw;
+      }
+      cells[idx] = String(val ?? '').trim();
+    }
+    rows.push(Array.from(cells, x => x || ''));
+  }
+  return rows;
+}
+
+// CSV（カンマ／タブ、ダブルクォート対応）
+function csvToRows(text) {
+  const sep = (text.split('\n')[0] || '').includes('\t') ? '\t' : ',';
+  const rows = [];
+  let row = [], cell = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else inQ = false; }
+      else cell += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === sep) { row.push(cell.trim()); cell = ''; }
+    else if (ch === '\n') { row.push(cell.trim()); rows.push(row); row = []; cell = ''; }
+    else if (ch !== '\r') cell += ch;
+  }
+  if (cell || row.length) { row.push(cell.trim()); rows.push(row); }
+  return rows;
+}
+
+// 表形式の行データ（Excel/CSV）→ 商品候補。PDFと同じ判定ロジックを流用する。
+function parseRowsAsUnitReport(rows) {
+  const cands = [];
+  const seen = new Set();
+  for (const cells of rows) {
+    const line = cells.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    const tm = line.match(TAIS_RE);
+    if (!tm) continue;
+    const tais = `${tm[1]}-${tm[2]}`;
+
+    // 種目名（○○貸与/販売）を含むセルから品目・区分を決める
+    let norm = null;
+    for (const c of cells) {
+      if (c && /(貸与|販売|購入)$/.test(c.replace(/[\s　]/g, ''))) { norm = normalizeItemLabel(c); break; }
+    }
+    // 商品名: TAIS・数値・区分・種目名以外で最も長い日本語セル
+    const nameCell = cells
+      .filter(c => c && !TAIS_RE.test(c) && !NUM_LIKE_RE.test(c) && !KUBUN_RE.test(c)
+        && !/(貸与|販売|購入)$/.test(c.replace(/[\s　]/g, '')) && HAS_JA_RE.test(c))
+      .sort((a, b) => b.length - a.length)[0] || '';
+    const productName = cleanName(nameCell);
+    if (!productName) continue;
+
+    // 単位数: 「単位」列の値、なければ行の最後の数値（月額）
+    const nums = cells.filter(c => NUM_LIKE_RE.test(c)).map(toInt).filter(n => n > 0);
+    const um = line.match(UNITS_RE);
+    const units = um ? toInt(um[1]) : (nums.length ? nums[nums.length - 1] : 0);
+    const km = line.match(KUBUN_RE);
+    const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
+
+    const key = `${productName}|${tais}|${units}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cands.push({
+      productName: productName.slice(0, 60), maker: '', tais, units,
+      item: norm ? norm.item : '', category: norm ? norm.category : CATEGORY_RENTAL, kubun,
+    });
+  }
+  return cands;
+}
+
+// 表データからヘッダー情報を抽出（PDF版と同じラベル規則を1行テキストに適用）
+function parseHeaderFromRows(rows) {
+  const spans = [];
+  rows.forEach((cells, ri) => {
+    cells.forEach((c, ci) => { if (c) spans.push({ text: c, page: 1, x: ci * 10, y: -ri * 10 }); });
+  });
+  return parseReportHeader(spans);
+}
+
+// ===== 単位数報告書のヘッダー情報（利用者名・居宅・ケアマネ・担当）を抽出 =====
+// 「ラベル：値」「ラベル 値」どちらの書式でも拾えるようにする。
+// ラベルは長いものから並べる（「居宅」が「居宅介護支援事業所」より先にマッチすると
+// 残りの「介護支援事業所」を値として拾ってしまうため）
+const HEADER_PATTERNS = [
+  { key: 'clientName', re: /(?:ご利用者名|ご利用者|被保険者名|被保険者|利用者名|利用者)\s*[:：]?\s*([^\s:：]{2,20})/ },
+  { key: 'cmOffice',   re: /(?:居宅介護支援事業所|居宅介護支援事業者|居宅事業所|支援事業所|事業所名|居宅)\s*[:：]?\s*([^\s:：]{2,30})/ },
+  { key: 'careManager',re: /(?:担当ケアマネジャー|担当ケアマネージャー|ケアマネジャー|ケアマネージャー|介護支援専門員|担当ケアマネ|ケアマネ)\s*[:：]?\s*([^\s:：]{2,20})/ },
+  { key: 'staff',      re: /(?:弊社担当者|弊社担当|自社担当|担当営業|営業担当)\s*[:：]?\s*([^\s:：]{2,20})/ },
+];
+// 値として不適切な語（ラベルの続きを誤って拾わないため）
+const BAD_HEADER_VALUE = /^(様|名|殿|欄|印|氏名|なし|無し|以下|上記|該当)$/;
+
+// テキストが「ラベルだけ」かを判定（セル/span単位）
+const headerLabelOf = (t) => {
+  const s = String(t || '').replace(/[\s　:：]/g, '');
+  if (/^(ご利用者名|ご利用者|被保険者名|被保険者|利用者名|利用者)$/.test(s)) return 'clientName';
+  if (/^(居宅介護支援事業所|居宅介護支援事業者|居宅事業所|支援事業所|事業所名|居宅)$/.test(s)) return 'cmOffice';
+  if (/^(担当ケアマネジャー|担当ケアマネージャー|ケアマネジャー|ケアマネージャー|介護支援専門員|担当ケアマネ|ケアマネ)$/.test(s)) return 'careManager';
+  if (/^(弊社担当者|弊社担当|自社担当|担当営業|営業担当)$/.test(s)) return 'staff';
+  return null;
+};
+
+function parseReportHeader(spans) {
+  const found = {};
+  // 先に「ラベルだけのセル → 隣（右 or 次）の値」を拾う。
+  // 正規表現を先に走らせると、"居宅介護支援事業所" が短い "居宅" にマッチして
+  // 残りの "介護支援事業所" を値と誤認するため、この順序が重要。
+  spans.forEach((sp, i) => {
+    const key = headerLabelOf(sp.text);
+    if (!key || found[key]) return;
+    const cand = spans
+      .filter(o => o !== sp && o.page === sp.page && Math.abs(o.y - sp.y) <= 4 && o.x > sp.x)
+      .sort((a, b) => a.x - b.x)[0] || spans[i + 1];
+    if (!cand) return;
+    const v = cand.text.replace(/^[:：\s　]+/, '').replace(/[様殿]\s*$/, '').trim();
+    if (v && !BAD_HEADER_VALUE.test(v) && !headerLabelOf(cand.text)) found[key] = v.slice(0, 30);
+  });
+  // 次に「ラベル：値」が1つのテキストに収まっているケース
+  for (const sp of spans) {
+    if (headerLabelOf(sp.text)) continue; // ラベル単独は上で処理済み
+    for (const p of HEADER_PATTERNS) {
+      if (found[p.key]) continue;
+      const m = sp.text.match(p.re);
+      if (!m) continue;
+      const v = m[1].replace(/[様殿]\s*$/, '').trim();
+      if (v && !BAD_HEADER_VALUE.test(v) && !headerLabelOf(v)) found[p.key] = v.slice(0, 30);
+    }
+  }
+  return found;
 }
 
 function parseRentalUnitReport(spans) {
@@ -776,6 +959,11 @@ const emptyReport = (settings) => ({
   reportType: '納品',
   remarks: '',
   sets: [],
+  showTotal: false,        // 合計単位数を帳票に出すか（既定はOFF）
+  importedRows: [],        // 取り込んだ単位数報告書の全行（2枚目の一覧表用）
+  showImportTable: true,   // 取込一覧表を帳票に付けるか
+  highlightDelivered: true,// 一覧表で納品分に色を付けるか
+  importSource: '',        // 取込元ファイル名
   updatedAt: Date.now(),
 });
 
@@ -835,7 +1023,6 @@ function buildPrintHTML(report, photoMap) {
   pages.push(sets.slice(0, page1Rows * 2));
   let i = page1Rows * 2;
   while (i < sets.length) { pages.push(sets.slice(i, i + 6)); i += 6; }
-  const totalPages = pages.length;
 
   const headerFirst = `
     <div class="phead">
@@ -861,6 +1048,7 @@ function buildPrintHTML(report, photoMap) {
     <div class="psummary">
       <span class="ptype">${e(report.reportType)}</span>
       <span>納品日：${e(fmtDateJa(report.deliveryDate) || '　　　年　月　日')}</span>
+      ${report.showTotal ? `<span class="punits">合計 ${units.toLocaleString()} 単位${sales ? `　／　販売 ¥${sales.toLocaleString()}` : ''}</span>` : ''}
     </div>
     <div class="premarks">
       <div class="premarks-title">報告事項</div>
@@ -872,6 +1060,34 @@ function buildPrintHTML(report, photoMap) {
       <span>福祉用具相談報告書　${e(report.clientName || '')}様邸</span>
       <span>${e(COMPANY_NAME)}${office ? '　' + e(office.name) : ''}</span>
     </div>`;
+
+  // 取込データの一覧表（納品分を色付け）。納品判定は「区分＝納品」＋「明細に載せた商品」
+  const rows = Array.isArray(report.importedRows) ? report.importedRows : [];
+  const useTable = report.showImportTable && rows.length > 0;
+  const deliveredKeys = new Set(sets.map(s => `${(s.productName || '').trim()}|${s.tais || ''}`));
+  const isDelivered = (r) => r.kubun === '納品' || deliveredKeys.has(`${(r.productName || '').trim()}|${r.tais || ''}`);
+  const ROWS_PER_TABLE_PAGE = 28;
+  const tableChunks = [];
+  for (let i = 0; useTable && i < rows.length; i += ROWS_PER_TABLE_PAGE) {
+    tableChunks.push(rows.slice(i, i + ROWS_PER_TABLE_PAGE));
+  }
+  const totalPages = pages.length + tableChunks.length;
+
+  const tableHTML = (chunk, ci) => `
+    <table class="ptable">
+      <colgroup><col style="width:8%"><col style="width:44%"><col style="width:20%"><col style="width:16%"><col style="width:12%"></colgroup>
+      <thead><tr><th>区分</th><th>商品名</th><th>TAISコード</th><th>種目</th><th>単位数</th></tr></thead>
+      <tbody>
+        ${chunk.map(r => `
+        <tr class="${report.highlightDelivered && isDelivered(r) ? 'prow-hit' : ''}">
+          <td class="pc-center">${e(r.kubun || '―')}</td>
+          <td class="pc-name">${e(r.productName || '')}</td>
+          <td class="pc-center">${e(r.tais || '―')}</td>
+          <td class="pc-center">${e(r.item || '')}</td>
+          <td class="pc-num">${toInt(r.units) ? toInt(r.units).toLocaleString() : '―'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
 
   const pagesHTML = pages.map((pageSets, p) => {
     let offset = 0;
@@ -885,7 +1101,19 @@ function buildPrintHTML(report, photoMap) {
         <div class="pfooter">${p + 1} / ${totalPages} ページ</div>
       </div>
     </div>`;
-  }).join('');
+  }).join('') + tableChunks.map((chunk, ci) => `
+    <div class="doc">
+      <div class="page">
+        ${headerCont()}
+        <div class="ptable-title">
+          レンタル単位数報告書 一覧${tableChunks.length > 1 ? `（${ci + 1}/${tableChunks.length}）` : ''}
+          ${report.importSource ? `<span class="ptable-src">取込元：${e(report.importSource)}</span>` : ''}
+        </div>
+        ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回納品した用具</div>' : ''}
+        ${tableHTML(chunk, ci)}
+        <div class="pfooter">${pages.length + ci + 1} / ${totalPages} ページ</div>
+      </div>
+    </div>`).join('');
 
   return `
   <style>
@@ -968,6 +1196,36 @@ function buildPrintHTML(report, photoMap) {
       font-size: 8.5pt; color: #374151; border-left: 2px solid #93c5fd; padding-left: 1.5mm; margin-top: 0.5mm;
       overflow-wrap: anywhere; max-height: 8.5mm; overflow: hidden; /* メモは最大2行で打ち切り（カード高さの暴れ防止） */
     }
+    /* 取込データ一覧表（2枚目以降） */
+    #print-content-holder .ptable-title {
+      display: flex; align-items: baseline; gap: 4mm; font-size: 12pt; font-weight: bold;
+      color: #1e3a8a; margin-bottom: 2mm;
+    }
+    #print-content-holder .ptable-src { font-size: 8pt; font-weight: normal; color: #4b5563; margin-left: auto; }
+    #print-content-holder .ptable-legend {
+      font-size: 8.5pt; color: #1f2937; margin-bottom: 1.5mm; display: flex; align-items: center; gap: 1.5mm;
+    }
+    #print-content-holder .plegend-box {
+      display: inline-block; width: 5mm; height: 3mm; background: #fef3c7; border: 1px solid #f59e0b;
+    }
+    #print-content-holder .ptable {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9pt;
+    }
+    #print-content-holder .ptable th {
+      background: #dbeafe; color: #1e3a8a; font-size: 8.5pt; border: 1px solid #93c5fd;
+      padding: 1.2mm 1.5mm; text-align: center;
+    }
+    #print-content-holder .ptable td {
+      border: 1px solid #bfdbfe; padding: 1.2mm 1.5mm; color: #1f2937;
+      overflow-wrap: anywhere; vertical-align: top;
+    }
+    #print-content-holder .ptable tbody tr:nth-child(even) td { background: #f8fbff; }
+    #print-content-holder .ptable .prow-hit td {
+      background: #fef3c7 !important; font-weight: bold; border-color: #f59e0b;
+    }
+    #print-content-holder .pc-center { text-align: center; }
+    #print-content-holder .pc-num { text-align: right; }
+    #print-content-holder .pc-name { overflow-wrap: anywhere; }
     #print-content-holder .pnone {
       border: 1px dashed #bfdbfe; border-radius: 1.5mm; padding: 8mm; text-align: center;
       color: #6b7280; font-size: 9.5pt;
@@ -1137,6 +1395,7 @@ function App() {
   // 起動時に商品マスタのゴミ（過去のPDF解析の残骸等）を静かに整理して読み込む
   const [master, setMaster] = useState(() => cleanMaster(loadStorage(STORAGE_KEYS.MASTER, [])).list);
   const [masterPick, setMasterPick] = useState(null); // マスタから選ぶダイアログの選択状態
+  const [masterOpen, setMasterOpen] = useState(false); // メイン画面の商品マスタ開閉
   const [drafts, setDrafts] = useState(() => loadStorage(STORAGE_KEYS.DRAFTS, {}));
   const [report, setReport] = useState(null);
   const [photoCache, setPhotoCache] = useState({});
@@ -1457,11 +1716,66 @@ function App() {
   }, []);
 
   // ---- レンタル単位数報告書（PDF）取込 ----
-  const handlePdf = async (file) => {
+  // 抽出結果を候補ダイアログに載せ、ヘッダー情報（利用者名等）と全行を報告書へ反映
+  const applyExtraction = (cands, header, kind, sourceName) => {
+    const delivered = cands.filter(c => c.kubun === '納品').length;
+    setPdfCands({
+      source: `${sourceName}（${kind}として読み取り）`,
+      // 単位数報告書は「納品」のみ既定でON（解約・引取などは一覧に残すがOFF）。
+      // カタログは区分の概念が無いので従来どおり全選択。
+      items: cands.map(c => ({
+        ...c, maker: '',
+        checked: kind === '単位数報告書' ? c.kubun === '納品' : true,
+      })),
+    });
+    // 単位数報告書なら、全行と取込元を保存（2枚目の一覧表用）
+    if (kind === '単位数報告書') {
+      setReport(r => ({
+        ...r, updatedAt: Date.now(),
+        importSource: sourceName,
+        importedRows: cands.map(c => ({
+          productName: c.productName, tais: c.tais, units: c.units,
+          kubun: c.kubun, item: c.item, category: c.category,
+        })),
+      }));
+    }
+    // ヘッダー情報は空欄のみ補完（入力済みは上書きしない）
+    const filled = [];
+    if (header && Object.keys(header).length) {
+      setReport(r => {
+        const next = { ...r, updatedAt: Date.now() };
+        for (const k of ['clientName', 'cmOffice', 'careManager', 'staff']) {
+          if (header[k] && !String(r[k] || '').trim()) { next[k] = header[k]; filled.push(k); }
+        }
+        return next;
+      });
+    }
+    const labels = { clientName: '利用者名', cmOffice: '居宅', careManager: 'ケアマネ', staff: '担当者' };
+    const headMsg = filled.length ? `／${filled.map(k => labels[k]).join('・')}も取り込みました` : '';
+    showToast(kind === '単位数報告書'
+      ? `${cands.length}件を抽出しました（納品${delivered}件を選択済み）${headMsg}`
+      : `${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
+  };
+
+  // PDF / Excel(.xlsx) / CSV を取り込む
+  const handleImportFile = async (file) => {
     if (!file) return;
-    setBusy('PDFを解析中…');
+    const name = (file.name || '').toLowerCase();
+    const isExcel = /\.(xlsx|xlsm)$/.test(name);
+    const isCsv = /\.(csv|txt|tsv)$/.test(name);
+    setBusy(isExcel || isCsv ? '表データを解析中…' : 'PDFを解析中…');
     setPendingDoc(null);
     try {
+      if (isExcel || isCsv) {
+        const rows = isExcel ? xlsxToRows(await file.arrayBuffer()) : csvToRows(await file.text());
+        const cands = parseRowsAsUnitReport(rows);
+        if (!cands.length) {
+          showToast('この表から商品情報（TAISコード）を読み取れませんでした。列の並びをご確認ください', 'error');
+          return;
+        }
+        applyExtraction(cands, parseHeaderFromRows(rows), '単位数報告書', file.name);
+        return;
+      }
       const buf = await file.arrayBuffer();
       const { spans, doc } = await pdfToLines(buf, setBusy);
       // ① レンタル単位数報告書（表形式）として解釈 → ② 該当なければカタログとして解釈
@@ -1470,19 +1784,7 @@ function App() {
       if (!cands.length) { cands = parseCandidatesFromLines(spans); kind = 'カタログ'; }
       if (cands.length) {
         setPendingDoc({ name: file.name, doc }); // 「AIで読み取り直す」用に保持
-        const delivered = cands.filter(c => c.kubun === '納品').length;
-        setPdfCands({
-          source: `${file.name}（${kind}として読み取り）`,
-          // 単位数報告書は「納品」のみ既定でON（解約・引取などは一覧に残すがOFF）。
-          // カタログは区分の概念が無いので従来どおり全選択。
-          items: cands.map(c => ({
-            ...c, maker: c.maker || '',
-            checked: kind === '単位数報告書' ? c.kubun === '納品' : true,
-          })),
-        });
-        showToast(kind === '単位数報告書'
-          ? `${cands.length}件を抽出しました（納品${delivered}件を選択済み。他は必要に応じてチェックしてください）`
-          : `${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
+        applyExtraction(cands, kind === '単位数報告書' ? parseReportHeader(spans) : null, kind, file.name);
       } else {
         // テキストが取れない（スキャンPDF等）→ AI読み取りを提案
         setPendingDoc({ name: file.name, doc });
@@ -1491,7 +1793,7 @@ function App() {
           : 'テキストを抽出できませんでした（画像として保存されたPDFの可能性）。手入力でご登録ください', 'error');
       }
     } catch (err) {
-      showToast(`PDF解析に失敗：${friendlyError(err)}`, 'error');
+      showToast(`読み取りに失敗：${friendlyError(err)}`, 'error');
     } finally { setBusy(null); }
   };
 
@@ -1729,6 +2031,16 @@ function App() {
         <Plus size={18} /> 新しい報告書を作成
       </button>
 
+      {/* 使い方（初めての人がまず見る導線） */}
+      <button
+        className="mt-2 w-full flex items-center gap-2 bg-white border border-slate-200 hover:border-blue-400 rounded-lg px-3 py-2.5 text-sm text-slate-700 shadow-sm transition"
+        onClick={() => setView('help')}>
+        <HelpCircle size={17} className="text-blue-600 shrink-0" />
+        <span className="font-bold">使い方（3ステップ）</span>
+        <span className="text-xs text-slate-500 hidden sm:inline">単位数報告書を取り込む → 写真を足す → 印刷</span>
+        <ChevronRight size={16} className="ml-auto text-slate-400 shrink-0" />
+      </button>
+
       {Object.keys(drafts).length > 0 && (
         <div className="mt-2 space-y-1.5">
           {Object.values(drafts).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(d => (
@@ -1769,11 +2081,128 @@ function App() {
         })}
       </div>
 
-      <div className="mt-8 flex gap-2 justify-center">
+      {/* 商品マスタ（メイン画面に配置） */}
+      <div className="mt-6 bg-white rounded-lg border border-slate-200 shadow-sm">
+        <button className="w-full flex items-center gap-2 px-3.5 py-3 text-left"
+          onClick={() => setMasterOpen(o => !o)}>
+          <BookOpen size={17} className="text-teal-600 shrink-0" />
+          <span className="text-sm font-bold text-slate-800">商品マスタ</span>
+          <span className="text-xs text-slate-500">{master.length} 件・種目別</span>
+          {masterOpen ? <ChevronUp size={16} className="ml-auto text-slate-400" /> : <ChevronDown size={16} className="ml-auto text-slate-400" />}
+        </button>
+        {masterOpen && (
+          <div className="px-3.5 pb-3.5">
+            <div className="flex items-center mb-2">
+              <p className="text-xs text-slate-500 flex-1">
+                覚えるのは<b>商品名</b>だけです。保存やPDF取込のたびに自動で貯まり、報告書作成時に「マスタから選ぶ」で呼び出せます。
+              </p>
+              {master.length > 0 && (
+                <button className="text-[11px] text-slate-400 hover:text-rose-600 shrink-0 ml-2"
+                  onClick={() => { if (confirm(`商品マスタを全部削除しますか？（${master.length}件）`)) setMaster([]); }}>すべて削除</button>
+              )}
+            </div>
+            <div className="max-h-72 overflow-y-auto border border-slate-100 rounded-md">
+              {masterGroups.map(g => (
+                <div key={g.item}>
+                  <div className="sticky top-0 bg-slate-100 text-slate-600 text-[11px] font-bold px-3 py-1">{g.item}（{g.items.length}）</div>
+                  {g.items.map(m => (
+                    <div key={m.name} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-slate-50">
+                      <span className="flex-1 min-w-0 truncate font-bold text-slate-700">{m.name}</span>
+                      <span className="text-slate-400 tabular-nums shrink-0">{m.tais || '―'}</span>
+                      <span className="text-slate-500 tabular-nums w-20 text-right shrink-0">
+                        {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units}単位`) : ''}
+                      </span>
+                      <button className="text-slate-300 hover:text-rose-600 shrink-0 p-2 -my-1" title="マスタから削除"
+                        onClick={() => { if (confirm(`商品マスタから「${m.name}」を削除しますか？`)) setMaster(list => list.filter(x => x.name !== m.name)); }}>
+                        <X size={16} /></button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {!master.length && <p className="text-xs text-slate-400 py-3 text-center">まだ学習した商品はありません</p>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 flex gap-2 justify-center">
         <button className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 border border-slate-300 rounded px-3 py-1.5 bg-white"
           onClick={exportAll}><Download size={13} /> 全データをエクスポート</button>
         <button className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 border border-slate-300 rounded px-3 py-1.5 bg-white"
           onClick={() => importInputRef.current?.click()}><Upload size={13} /> インポート</button>
+      </div>
+    </div>
+  );
+
+  // ---- 使い方 ----
+  const HELP_STEPS = [
+    {
+      n: 1, badge: 'bg-indigo-600', label: 'text-indigo-700', icon: <FileUp size={18} />, title: 'レンタル単位数報告書を取り込む',
+      body: [
+        '「新しい報告書を作成」→ 青い大きなボタン「STEP 1」を押して、単位数報告書のファイルを選びます。',
+        'PDF・Excel・CSV に対応しています。商品名・TAISコード・単位数のほか、利用者名・居宅介護支援事業所・ケアマネジャー名も自動で入ります。',
+        '一覧が出たら、納品したものにチェックが付いているか確認して「明細へ反映」を押します（解約・引取は自動でチェックが外れます）。',
+      ],
+    },
+    {
+      n: 2, badge: 'bg-emerald-600', label: 'text-emerald-700', icon: <Camera size={18} />, title: '現場の写真を足す',
+      body: [
+        '「カメラで撮影」でその場で撮るか、「写真を追加」で選びます。パソコンなら画面に写真をドラッグ＆ドロップしてもOKです。',
+        '写真は自動で軽くリサイズされるので、枚数が多くても重くなりません。',
+        '各明細の「納品箇所」（玄関・浴室など）を選ぶと報告書に印字されます。',
+      ],
+    },
+    {
+      n: 3, badge: 'bg-sky-600', label: 'text-sky-700', icon: <Printer size={18} />, title: '印刷・PDFで提出する',
+      body: [
+        '「印刷プレビュー」で仕上がりを確認します（未入力があっても確認できます）。',
+        '「印刷」で紙に、「PDF保存」でファイルにできます。ケアマネジャーへはPDFを送ると便利です。',
+        '印刷ダイアログでは、余白を「なし」にすると綺麗に収まります。',
+      ],
+    },
+  ];
+  const renderHelp = () => (
+    <div className="max-w-3xl mx-auto p-4 pb-24">
+      <header className="flex items-center gap-2 py-4">
+        <button className="text-slate-500 hover:text-slate-800 p-1.5" onClick={() => setView('list')}><ArrowLeft size={20} /></button>
+        <h1 className="text-lg font-bold text-slate-800">使い方</h1>
+      </header>
+
+      <div className="space-y-3">
+        {HELP_STEPS.map(s => (
+          <div key={s.n} className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className={`${s.badge} text-white rounded-lg p-2 shrink-0`}>{s.icon}</span>
+              <h2 className="text-sm font-bold text-slate-800">
+                <span className={`${s.label} mr-1.5`}>STEP {s.n}</span>{s.title}
+              </h2>
+            </div>
+            <ul className="space-y-1.5 text-xs text-slate-600 leading-relaxed list-disc pl-5">
+              {s.body.map((t, i) => <li key={i}>{t}</li>)}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-3">
+        <h2 className="text-sm font-bold text-slate-800 mb-2">便利な機能</h2>
+        <ul className="space-y-1.5 text-xs text-slate-600 leading-relaxed list-disc pl-5">
+          <li><b>商品マスタ</b>：一度使った商品名は自動で覚えます。次回は「マスタから選ぶ」でチェックするだけで明細に入ります。</li>
+          <li><b>特定福祉用具</b>（入浴補助用具・腰掛便座など）は単位数報告書に載らないため、専用ボタンから追加します。金額は「価格（円）」で入力します。</li>
+          <li><b>取込データの一覧表</b>：取り込んだ報告書の全明細を2枚目に付けられます。納品した用具に色が付くので、ケアマネジャーが確認しやすくなります（不要ならチェックを外せます）。</li>
+          <li><b>合計単位数</b>：既定では印字しません。必要なときだけチェックを入れてください。</li>
+          <li><b>下書き</b>：保存せずに閉じても内容は残ります。一覧の黄色い帯から再開できます。</li>
+          <li><b>複製</b>：毎月のモニタリングは、前回の報告書を複製すると入力が省けます（写真と報告事項は引き継ぎません）。</li>
+        </ul>
+      </div>
+
+      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-3">
+        <h2 className="text-sm font-bold text-slate-800 mb-2">困ったとき</h2>
+        <ul className="space-y-1.5 text-xs text-slate-600 leading-relaxed list-disc pl-5">
+          <li><b>取り込んでも商品が出ない</b>：画像として保存されたPDF（スキャン）の可能性があります。Excel版があればそちらをお試しください。</li>
+          <li><b>画面が古いまま</b>：Ctrl+F5（スマホは再読み込み）で最新版になります。</li>
+          <li><b>データはこの端末に保存されます</b>。機種変更や共有のときは、一覧の下にある「全データをエクスポート」でファイルに保存し、移行先で「インポート」してください。</li>
+        </ul>
       </div>
     </div>
   );
@@ -1831,36 +2260,9 @@ function App() {
       </div>
       )}
 
-      <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4">
-        <div className="flex items-center mb-2">
-          <h2 className="text-sm font-bold text-slate-700">商品マスタ（{master.length} 件・種目別）</h2>
-          {master.length > 0 && (
-            <button className="ml-auto text-[11px] text-slate-400 hover:text-rose-600"
-              onClick={() => { if (confirm(`商品マスタを全部削除しますか？（${master.length}件）`)) setMaster([]); }}>すべて削除</button>
-          )}
-        </div>
-        <p className="text-xs text-slate-500 mb-2">覚えるのは<b>商品名</b>だけです。保存やPDF取込のたびに自動で貯まり、商品名を入力すると TAIS・単位数が自動補完されます。</p>
-        <div className="max-h-72 overflow-y-auto border border-slate-100 rounded-md">
-          {masterGroups.map(g => (
-            <div key={g.item}>
-              <div className="sticky top-0 bg-slate-100 text-slate-600 text-[11px] font-bold px-3 py-1">{g.item}（{g.items.length}）</div>
-              {g.items.map(m => (
-                <div key={m.name} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-slate-50">
-                  <span className="flex-1 min-w-0 truncate font-bold text-slate-700">{m.name}</span>
-                  <span className="text-slate-400 tabular-nums shrink-0">{m.tais || '―'}</span>
-                  <span className="text-slate-500 tabular-nums w-20 text-right shrink-0">
-                    {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units}単位`) : ''}
-                  </span>
-                  <button className="text-slate-300 hover:text-rose-600 shrink-0 p-2 -my-1" title="マスタから削除"
-                    onClick={() => { if (confirm(`商品マスタから「${m.name}」を削除しますか？`)) setMaster(list => list.filter(x => x.name !== m.name)); }}>
-                    <X size={16} /></button>
-                </div>
-              ))}
-            </div>
-          ))}
-          {!master.length && <p className="text-xs text-slate-400 py-3 text-center">まだ学習した商品はありません</p>}
-        </div>
-      </div>
+      <p className="text-xs text-slate-500 mt-4 text-center">
+        商品マスタはメイン画面（報告書一覧）に移動しました。
+      </p>
     </div>
   );
 
@@ -1943,38 +2345,86 @@ function App() {
           </div>
         </section>
 
-        {/* 取込ボタン群 */}
-        <section className={`mt-3 grid grid-cols-2 gap-2 ${AI_ENABLED ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
-          <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
-            <ImagePlus size={16} /> 写真を追加
+        {/* ステップ1: 単位数報告書の取込（最初にやってほしい操作なので大きく目立たせる） */}
+        <section className="mt-3">
+          <button
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-md px-4 py-4 flex items-center gap-3 transition"
+            onClick={() => pdfInputRef.current?.click()}>
+            <span className="bg-white/20 rounded-lg p-2.5 shrink-0"><FileUp size={26} /></span>
+            <span className="text-left flex-1 min-w-0">
+              <span className="block text-base md:text-lg font-bold">
+                <span className="bg-white text-indigo-700 rounded px-1.5 py-0.5 text-xs align-middle mr-2">STEP 1</span>
+                レンタル単位数報告書を取り込む
+              </span>
+              <span className="block text-[11px] md:text-xs text-indigo-100 mt-1">
+                PDF・Excel・CSV に対応／商品名・TAIS・単位数に加え、利用者名・居宅・ケアマネも自動入力します
+              </span>
+            </span>
+            <Upload size={20} className="shrink-0 opacity-80" />
           </button>
-          <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
-            <Camera size={16} /> カメラで撮影
-          </button>
-          <button className={`${btn('indigo')} justify-center`} onClick={() => pdfInputRef.current?.click()}>
-            <FileUp size={16} /> 単位数報告書PDF取込
-          </button>
-          {AI_ENABLED && (
-            <button className={`${btn('purple')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
-              title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
-              onClick={recognizeAll}>
-              <Sparkles size={16} /> AIで全写真を認識
-            </button>
+          {report.importSource && (
+            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2.5 py-1.5">
+              <CheckCircle2 size={13} className="shrink-0" />
+              取込済み：{report.importSource}（{report.importedRows.length}行）
+            </div>
           )}
         </section>
 
-        {/* 手入力・マスタからの追加 */}
-        <section className="mt-2 grid grid-cols-2 gap-2">
-          <button className={`${btn('teal')} justify-center`} onClick={openMasterPick}>
-            <BookOpen size={16} /> マスタから選ぶ
-          </button>
-          <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
-            <PackagePlus size={16} /> 特定福祉用具を追加
-          </button>
-          <p className="col-span-2 text-[11px] text-slate-500 leading-relaxed">
-            マスタから選ぶ＝過去に使った商品名をチェックして報告書へ一括追加／
-            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため、このボタンから追加してください
+        {/* ステップ2: 写真・明細の追加 */}
+        <section className="mt-3">
+          <div className="text-[11px] font-bold text-slate-500 mb-1.5">
+            <span className="bg-slate-200 text-slate-700 rounded px-1.5 py-0.5 mr-1.5">STEP 2</span>写真と明細を追加
+          </div>
+          <div className={`grid grid-cols-2 gap-2 ${AI_ENABLED ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+            <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
+              <ImagePlus size={16} /> 写真を追加
+            </button>
+            <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
+              <Camera size={16} /> カメラで撮影
+            </button>
+            <button className={`${btn('cyan')} justify-center`} onClick={openMasterPick}>
+              <BookOpen size={16} /> マスタから選ぶ
+            </button>
+            <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
+              <PackagePlus size={16} /> 特定福祉用具
+            </button>
+            {AI_ENABLED && (
+              <button className={`${btn('fuchsia')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
+                title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
+                onClick={recognizeAll}>
+                <Sparkles size={16} /> AI認識
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed mt-1.5">
+            マスタから選ぶ＝過去に使った商品名をチェックして一括追加／
+            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため専用ボタンから追加します
           </p>
+        </section>
+
+        {/* 帳票の表示オプション */}
+        <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3">
+          <div className="text-[11px] font-bold text-slate-500 mb-2">帳票に載せるもの</div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            <label className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!report.showTotal}
+                onChange={e => updateReport({ showTotal: e.target.checked })} />
+              合計単位数を表示する
+            </label>
+            <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${report.importedRows.length ? 'text-slate-700' : 'text-slate-300'}`}>
+              <input type="checkbox" className="w-4 h-4 accent-blue-600" disabled={!report.importedRows.length}
+                checked={!!report.showImportTable}
+                onChange={e => updateReport({ showImportTable: e.target.checked })} />
+              取込データの一覧表を付ける
+            </label>
+            <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${report.importedRows.length && report.showImportTable ? 'text-slate-700' : 'text-slate-300'}`}>
+              <input type="checkbox" className="w-4 h-4 accent-blue-600"
+                disabled={!report.importedRows.length || !report.showImportTable}
+                checked={!!report.highlightDelivered}
+                onChange={e => updateReport({ highlightDelivered: e.target.checked })} />
+              一覧表で納品分に色を付ける
+            </label>
+          </div>
         </section>
 
         {pendingDoc && !pdfCands && (
@@ -2166,24 +2616,24 @@ function App() {
     if (report && !report.clientName.trim()) missing.push('利用者名');
     if (report && !report.office) missing.push('営業所');
     if (report && !report.deliveryDate) missing.push('納品日');
+    // 重なり順の注意: ボタンを背景レイヤ(z-60)の子にすると、その中でz-65にしても
+    // 実効的には60止まりになり、プレビュー本体(#print-content-holder, z-61)に
+    // 覆われてクリックできなくなる。背景とボタンは兄弟にして、ボタンをz-80に置く。
     return (
-    <div className="fixed inset-0 z-[60] bg-slate-700/90 overflow-y-auto no-print" onClick={closePrint}>
-      <div className="fixed top-3 right-3 z-[65] flex gap-2 no-print" onClick={e => e.stopPropagation()}>
+    <>
+      <div className="fixed inset-0 z-[60] bg-slate-700/90 no-print" />
+      <div className="fixed top-3 right-3 z-[80] flex gap-2 no-print">
         <button className={btn('sky')} onClick={doPrint}><Printer size={16} /> 印刷</button>
         <button className={btn('indigo')} onClick={savePdf}><FileDown size={16} /> PDF保存</button>
         <button className={btn('rose')} onClick={closePrint}><X size={16} /> 閉じる</button>
       </div>
       {missing.length > 0 && (
-        <div className="fixed top-3 left-3 z-[65] no-print bg-amber-50 border border-amber-400 text-amber-800 rounded-md px-3 py-2 text-xs font-bold shadow-lg max-w-[45vw]"
-          onClick={e => e.stopPropagation()}>
+        <div className="fixed top-3 left-3 z-[80] no-print bg-amber-50 border border-amber-400 text-amber-800 rounded-md px-3 py-2 text-xs font-bold shadow-lg max-w-[45vw]">
           <div className="flex items-center gap-1.5"><AlertTriangle size={14} className="shrink-0" />未入力：{missing.join('・')}</div>
           <div className="font-normal mt-0.5">プレビューはこのまま確認できます（提出前にご入力ください）</div>
         </div>
       )}
-      <div className="py-8 no-print-preview" onClick={e => e.stopPropagation()}>
-        {/* 実体は #print-content-holder。ここではプレビュー表示指示のみ */}
-      </div>
-    </div>
+    </>
     );
   };
 
@@ -2218,6 +2668,10 @@ function App() {
         width: 'auto', maxWidth: 'none',
       });
       document.body.style.overflow = 'hidden'; // 背面のスクロールを止める
+      // 用紙の外（余白）をクリックしたら閉じる
+      const onBgClick = (e) => { if (e.target === holder) closePrint(); };
+      holder.addEventListener('click', onBgClick);
+      return () => { holder.removeEventListener('click', onBgClick); document.body.style.overflow = ''; };
     } else {
       apply({
         display: '', position: '', top: '', left: '', right: '', bottom: '',
@@ -2231,6 +2685,7 @@ function App() {
   return (
     <div>
       {view === 'list' && renderList()}
+      {view === 'help' && renderHelp()}
       {view === 'settings' && renderSettings()}
       {view === 'edit' && report && renderEdit()}
       {pdfCands && renderPdfCands()}
@@ -2244,8 +2699,9 @@ function App() {
         onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
       <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden"
         onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
-      <input ref={pdfInputRef} type="file" accept="application/pdf" className="hidden"
-        onChange={e => { handlePdf(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+      <input ref={pdfInputRef} type="file" className="hidden"
+        accept=".pdf,.xlsx,.xlsm,.csv,.tsv,.txt,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+        onChange={e => { handleImportFile(e.target.files && e.target.files[0]); e.target.value = ''; }} />
       <input ref={importInputRef} type="file" accept="application/json" className="hidden"
         onChange={e => { importAll(e.target.files && e.target.files[0]); e.target.value = ''; }} />
     </div>
