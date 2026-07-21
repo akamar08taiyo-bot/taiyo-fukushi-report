@@ -2036,8 +2036,8 @@ function App() {
         className="mt-2 w-full flex items-center gap-2 bg-white border border-slate-200 hover:border-blue-400 rounded-lg px-3 py-2.5 text-sm text-slate-700 shadow-sm transition"
         onClick={() => setView('help')}>
         <HelpCircle size={17} className="text-blue-600 shrink-0" />
-        <span className="font-bold">使い方（3ステップ）</span>
-        <span className="text-xs text-slate-500 hidden sm:inline">単位数報告書を取り込む → 写真を足す → 印刷</span>
+        <span className="font-bold">使い方（4ステップ）</span>
+        <span className="text-xs text-slate-500 hidden sm:inline">取り込む → 情報を確認 → 写真を足す → 印刷</span>
         <ChevronRight size={16} className="ml-auto text-slate-400 shrink-0" />
       </button>
 
@@ -2145,7 +2145,14 @@ function App() {
       ],
     },
     {
-      n: 2, badge: 'bg-emerald-600', label: 'text-emerald-700', icon: <Camera size={18} />, title: '現場の写真を足す',
+      n: 2, badge: 'bg-slate-600', label: 'text-slate-700', icon: <ClipboardList size={18} />, title: '報告書の情報を確認する',
+      body: [
+        '利用者名・居宅介護支援事業所・担当ケアマネジャーは STEP 1 の取込で自動で入ります。空欄や違うところだけ直してください。',
+        '営業所は必ず選んでください（報告書の発行元として住所・電話番号が印字されます）。担当者と営業所は一度保存すると次回から自動で入ります。',
+      ],
+    },
+    {
+      n: 3, badge: 'bg-emerald-600', label: 'text-emerald-700', icon: <Camera size={18} />, title: '写真と明細を足す',
       body: [
         '「カメラで撮影」でその場で撮るか、「写真を追加」で選びます。パソコンなら画面に写真をドラッグ＆ドロップしてもOKです。',
         '写真は自動で軽くリサイズされるので、枚数が多くても重くなりません。',
@@ -2153,7 +2160,7 @@ function App() {
       ],
     },
     {
-      n: 3, badge: 'bg-sky-600', label: 'text-sky-700', icon: <Printer size={18} />, title: '印刷・PDFで提出する',
+      n: 4, badge: 'bg-sky-600', label: 'text-sky-700', icon: <Printer size={18} />, title: '印刷・PDFで提出する',
       body: [
         '「印刷プレビュー」で仕上がりを確認します（未入力があっても確認できます）。',
         '「印刷」で紙に、「PDF保存」でファイルにできます。ケアマネジャーへはPDFを送ると便利です。',
@@ -2322,40 +2329,12 @@ function App() {
         </section>
 
         {/* ステップ2: 写真・明細の追加 */}
-        <section className="mt-3">
-          <div className="text-[11px] font-bold text-slate-500 mb-1.5">
-            <span className="bg-slate-200 text-slate-700 rounded px-1.5 py-0.5 mr-1.5">STEP 2</span>写真と明細を追加
-          </div>
-          <div className={`grid grid-cols-2 gap-2 ${AI_ENABLED ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
-            <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
-              <ImagePlus size={16} /> 写真を追加
-            </button>
-            <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
-              <Camera size={16} /> カメラで撮影
-            </button>
-            <button className={`${btn('cyan')} justify-center`} onClick={openMasterPick}>
-              <BookOpen size={16} /> マスタから選ぶ
-            </button>
-            <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
-              <PackagePlus size={16} /> 特定福祉用具
-            </button>
-            {AI_ENABLED && (
-              <button className={`${btn('fuchsia')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
-                title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
-                onClick={recognizeAll}>
-                <Sparkles size={16} /> AI認識
-              </button>
-            )}
-          </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed mt-1.5">
-            マスタから選ぶ＝過去に使った商品名をチェックして一括追加／
-            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため専用ボタンから追加します
-          </p>
-        </section>
-
-        {/* 基本情報（STEP1で取り込むと自動で埋まるため、STEPの下に配置） */}
+        {/* ステップ2: 利用者情報（STEP1で取り込むと自動で埋まる） */}
         <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
-          <div className="text-[11px] font-bold text-slate-500 mb-2">報告書の情報（STEP 1 の取込で自動入力されます）</div>
+          <div className="text-[11px] font-bold text-slate-500 mb-2">
+            <span className="bg-slate-200 text-slate-700 rounded px-1.5 py-0.5 mr-1.5">STEP 2</span>
+            報告書の情報（STEP 1 の取込で自動入力されます）
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
             <div className="col-span-2 md:col-span-1">
               <label className={labelCls}>利用者名 <span className="text-rose-500">*</span></label>
@@ -2401,6 +2380,38 @@ function App() {
                 onChange={e => updateReport({ staff: e.target.value })} />
             </div>
           </div>
+        </section>
+
+        {/* ステップ3: 写真と明細を追加 */}
+        <section className="mt-3">
+          <div className="text-[11px] font-bold text-slate-500 mb-1.5">
+            <span className="bg-slate-200 text-slate-700 rounded px-1.5 py-0.5 mr-1.5">STEP 3</span>写真と明細を追加
+          </div>
+          <div className={`grid grid-cols-2 gap-2 ${AI_ENABLED ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+            <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
+              <ImagePlus size={16} /> 写真を追加
+            </button>
+            <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
+              <Camera size={16} /> カメラで撮影
+            </button>
+            <button className={`${btn('cyan')} justify-center`} onClick={openMasterPick}>
+              <BookOpen size={16} /> マスタから選ぶ
+            </button>
+            <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
+              <PackagePlus size={16} /> 特定福祉用具
+            </button>
+            {AI_ENABLED && (
+              <button className={`${btn('fuchsia')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
+                title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
+                onClick={recognizeAll}>
+                <Sparkles size={16} /> AI認識
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed mt-1.5">
+            マスタから選ぶ＝過去に使った商品名をチェックして一括追加／
+            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため専用ボタンから追加します
+          </p>
         </section>
 
         {/* 帳票の表示オプション */}
