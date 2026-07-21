@@ -1247,7 +1247,7 @@ const btn = (color) =>
 // bg-emerald-600 hover:bg-emerald-700 bg-blue-600 hover:bg-blue-700 bg-rose-600 hover:bg-rose-700
 // bg-sky-600 hover:bg-sky-700 bg-indigo-600 hover:bg-indigo-700 bg-teal-600 hover:bg-teal-700
 // bg-purple-600 hover:bg-purple-700 bg-slate-600 hover:bg-slate-700 bg-fuchsia-600 hover:bg-fuchsia-700
-// bg-amber-600 hover:bg-amber-700 bg-cyan-800 hover:bg-cyan-700
+// bg-amber-600 hover:bg-amber-700 bg-cyan-600 hover:bg-cyan-700 bg-cyan-800
 
 const inputCls = 'h-9 px-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 w-full';
 const labelCls = 'text-xs font-bold text-slate-500 mb-0.5 block';
@@ -2296,57 +2296,8 @@ function App() {
           <button className="text-slate-500 hover:text-slate-700 p-2" onClick={() => { prevViewRef.current = 'edit'; setView('settings'); }}><Settings size={18} /></button>
         </header>
 
-        {/* 基本情報 */}
-        <section className="bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
-            <div className="col-span-2 md:col-span-1">
-              <label className={labelCls}>利用者名 <span className="text-rose-500">*</span></label>
-              <div className="flex items-center gap-1">
-                <input className={inputCls} value={report.clientName} placeholder="例：山田 花子"
-                  onChange={e => updateReport({ clientName: e.target.value })} />
-                <span className="text-xs text-slate-500 shrink-0">様邸</span>
-              </div>
-            </div>
-            <div>
-              <label className={labelCls}>納品日・訪問日</label>
-              <input className={inputCls} type="date" value={report.deliveryDate}
-                onChange={e => updateReport({ deliveryDate: e.target.value })} />
-            </div>
-            <div>
-              <label className={labelCls}>報告区分</label>
-              <select className={inputCls} value={report.reportType}
-                onChange={e => updateReport({ reportType: e.target.value })}>
-                {REPORT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>営業所</label>
-              <select className={inputCls} value={report.office}
-                onChange={e => updateReport({ office: e.target.value })}>
-                <option value="">（営業所を選択）</option>
-                {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>居宅介護支援事業所</label>
-              <input className={inputCls} value={report.cmOffice} placeholder="例：○○ケアプランセンター"
-                onChange={e => updateReport({ cmOffice: e.target.value })} />
-            </div>
-            <div>
-              <label className={labelCls}>担当ケアマネジャー</label>
-              <input className={inputCls} value={report.careManager} placeholder="例：佐藤 一郎"
-                onChange={e => updateReport({ careManager: e.target.value })} />
-            </div>
-            <div>
-              <label className={labelCls}>担当者（自社）</label>
-              <input className={inputCls} value={report.staff}
-                onChange={e => updateReport({ staff: e.target.value })} />
-            </div>
-          </div>
-        </section>
-
         {/* ステップ1: 単位数報告書の取込（最初にやってほしい操作なので大きく目立たせる） */}
-        <section className="mt-3">
+        <section className="">
           <button
             className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-md px-4 py-4 flex items-center gap-3 transition"
             onClick={() => pdfInputRef.current?.click()}>
@@ -2400,6 +2351,56 @@ function App() {
             マスタから選ぶ＝過去に使った商品名をチェックして一括追加／
             特定福祉用具（入浴補助用具など）は単位数報告書に載らないため専用ボタンから追加します
           </p>
+        </section>
+
+        {/* 基本情報（STEP1で取り込むと自動で埋まるため、STEPの下に配置） */}
+        <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
+          <div className="text-[11px] font-bold text-slate-500 mb-2">報告書の情報（STEP 1 の取込で自動入力されます）</div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+            <div className="col-span-2 md:col-span-1">
+              <label className={labelCls}>利用者名 <span className="text-rose-500">*</span></label>
+              <div className="flex items-center gap-1">
+                <input className={inputCls} value={report.clientName} placeholder="例：山田 花子"
+                  onChange={e => updateReport({ clientName: e.target.value })} />
+                <span className="text-xs text-slate-500 shrink-0">様邸</span>
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>納品日・訪問日</label>
+              <input className={inputCls} type="date" value={report.deliveryDate}
+                onChange={e => updateReport({ deliveryDate: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>報告区分</label>
+              <select className={inputCls} value={report.reportType}
+                onChange={e => updateReport({ reportType: e.target.value })}>
+                {REPORT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>営業所</label>
+              <select className={inputCls} value={report.office}
+                onChange={e => updateReport({ office: e.target.value })}>
+                <option value="">（営業所を選択）</option>
+                {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>居宅介護支援事業所</label>
+              <input className={inputCls} value={report.cmOffice} placeholder="例：○○ケアプランセンター"
+                onChange={e => updateReport({ cmOffice: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>担当ケアマネジャー</label>
+              <input className={inputCls} value={report.careManager} placeholder="例：佐藤 一郎"
+                onChange={e => updateReport({ careManager: e.target.value })} />
+            </div>
+            <div>
+              <label className={labelCls}>担当者（自社）</label>
+              <input className={inputCls} value={report.staff}
+                onChange={e => updateReport({ staff: e.target.value })} />
+            </div>
+          </div>
         </section>
 
         {/* 帳票の表示オプション */}
