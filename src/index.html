@@ -46,7 +46,8 @@ import ReactDOM from 'react-dom/client';
 import {
   ArrowLeft, Camera, ImagePlus, FileText, Printer, Save, Settings, Trash2,
   Plus, X, Sparkles, Download, Upload, FileUp, Loader2, ClipboardList,
-  FileDown, Copy, CheckCircle2, AlertTriangle, FolderOpen, Wand2
+  FileDown, Copy, CheckCircle2, AlertTriangle, FolderOpen, Wand2,
+  BookOpen, PackagePlus
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs';
@@ -416,7 +417,7 @@ const stripNoise = (line) => line
 // 列見出しは … 区分│料金│日数│単位数│日数│単位数 で、
 // 手前の単位数は日割り、**最後の単位数が月額**（226/400）。
 // 区分（状態）の語。長い語を先に並べる（解約済→解約、引き取り→引取 の順で判定するため）
-const KUBUN_RE = /(納品|引き取り|引取|解約済|解約|返却|撤去|継続|変更|中止|交換|再貸与|開始|終了)/;
+const KUBUN_RE = /(納品|引き取り|引取|解約済|解約|一時中止|中止|中断|休止|再開|返却|撤去|継続|変更|交換|再貸与|開始|終了)/;
 
 // 種目名 → 標準品目名＋区分（「予防手すり貸与」→ 手すり／介護予防福祉用具貸与）
 function normalizeItemLabel(label) {
@@ -698,16 +699,44 @@ ${itemsDesc || '（明細なし）'}
 }
 
 // ===== 商品マスタ（使うほど賢くなる学習辞書） =====
+// マスタには「商品名」だけを覚える。種目名・区分・会社名・数値列などの
+// ゴミ（過去のPDF解析の残骸を含む）は登録しない。
+const ALL_ITEM_LABELS = [...RENTAL_ITEMS, ...SPECIFIC_ITEMS, ...SELECTABLE_ITEMS];
+function isJunkMasterName(name) {
+  const n = String(name || '').trim();
+  if (n.length < 2) return true;
+  if (/^[〜～]/.test(n)) return true;                                   // 「〜 レンタル終了日」
+  if (/レンタル(開始|終了)|納品|引取|引き取り|解約|継続|中止|中断|休止|返却|撤去|再貸与/.test(n)) return true; // 区分・状態語
+  if (/(貸与|販売|購入)$/.test(n.replace(/[\s　]/g, ''))) return true;   // 「予防歩行器貸与」等の種目行
+  if (/太陽シルバーサービス|株式会社|営業所/.test(n)) return true;       // 会社・営業所名
+  if (/\d[\d,]*\s+(半月|月額)|(半月|月額)\s+\d/.test(n)) return true;    // 数値列（料金・単位数）
+  if ((n.match(/\d[\d,]{2,}/g) || []).length >= 2) return true;         // 数値の羅列
+  if (ALL_ITEM_LABELS.includes(n.replace(/[\s　]/g, ''))) return true;   // 種目名そのもの（手すり等）
+  return false;
+}
+
+// 既存マスタからゴミを除去（重複も統合）。戻り値 {list, removed}
+function cleanMaster(master) {
+  const seen = new Map();
+  let removed = 0;
+  for (const m of master) {
+    if (!m || isJunkMasterName(m.name)) { removed++; continue; }
+    const name = m.name.trim();
+    const cur = seen.get(name);
+    if (!cur || (m.updatedAt || 0) > (cur.updatedAt || 0)) seen.set(name, { ...m, name });
+  }
+  return { list: [...seen.values()], removed };
+}
+
 function upsertMaster(master, sets) {
   const next = [...master];
   for (const s of sets) {
     const name = (s.productName || '').trim();
-    if (!name) continue;
+    if (!name || isJunkMasterName(name)) continue; // 商品名以外は覚えない
     const idx = next.findIndex(m => m.name === name);
     const entry = {
       name,
       tais: s.tais || '',
-      maker: s.maker || '',
       category: s.category || '',
       item: s.item || '',
       units: toInt(s.units),
@@ -719,7 +748,6 @@ function upsertMaster(master, sets) {
       next[idx] = {
         ...entry,
         tais: entry.tais || old.tais,
-        maker: entry.maker || old.maker,
         category: entry.category || old.category,
         item: entry.item || old.item,
         units: entry.units || old.units,
@@ -832,9 +860,7 @@ function buildPrintHTML(report, photoMap) {
     </div>
     <div class="psummary">
       <span class="ptype">${e(report.reportType)}</span>
-      <span>納品日：${e(fmtDateJa(report.deliveryDate))}</span>
-      <span>貸与 ${rental} 件　／　特定福祉用具 ${specific} 件</span>
-      <span class="punits">合計 ${units.toLocaleString()} 単位${sales ? `　／　販売 ¥${sales.toLocaleString()}` : ''}</span>
+      <span>納品日：${e(fmtDateJa(report.deliveryDate) || '　　　年　月　日')}</span>
     </div>
     <div class="premarks">
       <div class="premarks-title">報告事項</div>
@@ -932,14 +958,14 @@ function buildPrintHTML(report, photoMap) {
       width: 5.5mm; height: 5.5mm; background: #1e3a8a; color: #fff;
       font-size: 9pt; font-weight: bold; border-radius: 1mm; flex-shrink: 0;
     }
-    #print-content-holder .pplace { font-size: 10pt; font-weight: bold; }
-    #print-content-holder .pcap-row2 { font-size: 9.5pt; }
-    #print-content-holder .pcap-row3 { font-size: 9pt; color: #1f2937; overflow-wrap: anywhere; }
+    #print-content-holder .pplace { font-size: 10pt; font-weight: bold; color: #111827; }
+    #print-content-holder .pcap-row2 { font-size: 9.5pt; color: #111827; font-weight: bold; }
+    #print-content-holder .pcap-row3 { font-size: 9.5pt; color: #1f2937; overflow-wrap: anywhere; }
     #print-content-holder .pcap-row4 {
-      display: flex; justify-content: space-between; font-size: 8.5pt; color: #4b5563; margin-top: 0.5mm;
+      display: flex; justify-content: space-between; font-size: 9pt; color: #1f2937; font-weight: bold; margin-top: 0.5mm;
     }
     #print-content-holder .pcap-note {
-      font-size: 8pt; color: #4b5563; border-left: 2px solid #bfdbfe; padding-left: 1.5mm; margin-top: 0.5mm;
+      font-size: 8.5pt; color: #374151; border-left: 2px solid #93c5fd; padding-left: 1.5mm; margin-top: 0.5mm;
       overflow-wrap: anywhere; max-height: 8.5mm; overflow: hidden; /* メモは最大2行で打ち切り（カード高さの暴れ防止） */
     }
     #print-content-holder .pnone {
@@ -1108,7 +1134,9 @@ function App() {
     if (!AI_ENABLED) s.apiKey = ''; // AI機能OFF時は保管済みキーを残さない
     return s;
   });
-  const [master, setMaster] = useState(() => loadStorage(STORAGE_KEYS.MASTER, []));
+  // 起動時に商品マスタのゴミ（過去のPDF解析の残骸等）を静かに整理して読み込む
+  const [master, setMaster] = useState(() => cleanMaster(loadStorage(STORAGE_KEYS.MASTER, [])).list);
+  const [masterPick, setMasterPick] = useState(null); // マスタから選ぶダイアログの選択状態
   const [drafts, setDrafts] = useState(() => loadStorage(STORAGE_KEYS.DRAFTS, {}));
   const [report, setReport] = useState(null);
   const [photoCache, setPhotoCache] = useState({});
@@ -1171,6 +1199,19 @@ function App() {
 
   // 一覧に戻ったら写真のメモリキャッシュを解放（報告書を渡り歩いた際の肥大化防止）
   useEffect(() => { if (view === 'list') setPhotoCache({}); }, [view]);
+
+  // マスタは種目別にグループ化（商品名だけの一覧を項目ごとにまとめる）
+  const masterGroups = useMemo(() => {
+    const g = {};
+    for (const m of master) {
+      const key = m.item || 'その他';
+      (g[key] = g[key] || []).push(m);
+    }
+    const order = [...RENTAL_ITEMS, ...SPECIFIC_ITEMS, ...SELECTABLE_ITEMS, 'その他'];
+    return Object.keys(g)
+      .sort((a, b) => (order.indexOf(a) + 1 || 999) - (order.indexOf(b) + 1 || 999))
+      .map(k => ({ item: k, items: g[k].slice().sort((a, b) => a.name.localeCompare(b.name, 'ja')) }));
+  }, [master]);
 
   // ---- 写真キャッシュ（IndexedDB → メモリ） ----
   const ensurePhotos = useCallback(async (ids) => {
@@ -1491,7 +1532,7 @@ function App() {
           const c = queue.shift();
           sets[i] = {
             ...sets[i],
-            productName: c.productName, maker: c.maker || sets[i].maker,
+            productName: c.productName,
             tais: c.tais || sets[i].tais,
             item: c.item || sets[i].item,
             category: c.category || sets[i].category,
@@ -1502,17 +1543,47 @@ function App() {
       // 2) 余りは新規カード
       for (const c of queue) {
         sets.push({
-          ...emptySet(), productName: c.productName, maker: c.maker || '', tais: c.tais || '',
+          ...emptySet(), productName: c.productName, tais: c.tais || '',
           item: c.item || '', category: c.category || CATEGORY_RENTAL,
           units: c.units ? String(c.units) : '',
         });
       }
       return { ...r, updatedAt: Date.now(), sets };
     });
-    setMaster(m => upsertMaster(m, chosen.map(c => ({ productName: c.productName, tais: c.tais, maker: c.maker, units: c.units }))));
+    setMaster(m => upsertMaster(m, chosen.map(c => ({ productName: c.productName, tais: c.tais, item: c.item, category: c.category, units: c.units }))));
     setPdfCands(null);
     setPendingDoc(null); // 反映完了後は「テキストを抽出できませんでした」バナーを出さない
     showToast(`${chosen.length}件を明細に反映しました`);
+  };
+
+  // ---- 特定福祉用具を1件追加（単位数報告書に載らないため手動追加用） ----
+  const addSpecificItem = () => {
+    setReport(r => ({
+      ...r, updatedAt: Date.now(),
+      sets: [...r.sets, { ...emptySet(), category: CATEGORY_SPECIFIC }],
+    }));
+    showToast('特定福祉用具の明細を追加しました。品目を選んでください');
+  };
+
+  // ---- 商品マスタから選んで報告書へ一括追加 ----
+  const openMasterPick = () => {
+    if (!master.length) { showToast('商品マスタにまだ商品がありません。保存やPDF取込で貯まります'); return; }
+    setMasterPick({}); // {name: true} のチェック状態
+  };
+  const applyMasterPick = () => {
+    const chosen = master.filter(m => masterPick[m.name]);
+    if (!chosen.length) { showToast('追加する商品を選択してください', 'error'); return; }
+    setReport(r => ({
+      ...r, updatedAt: Date.now(),
+      sets: [...r.sets, ...chosen.map(m => ({
+        ...emptySet(),
+        productName: m.name, tais: m.tais || '',
+        item: m.item || '', category: m.category || CATEGORY_RENTAL,
+        units: m.units ? String(m.units) : '',
+      }))],
+    }));
+    setMasterPick(null);
+    showToast(`${chosen.length}件を報告書に追加しました`);
   };
 
   // ---- 印刷 / PDF ----
@@ -1680,7 +1751,6 @@ function App() {
           <p className="text-center text-sm text-slate-400 py-10">保存された報告書はまだありません</p>
         )}
         {reports.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(r => {
-          const sm = reportSummary(r);
           return (
             <div key={r.id} className="bg-white rounded-lg border border-slate-200 shadow-sm p-3 flex items-center gap-3">
               <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openReport(r)}>
@@ -1689,7 +1759,7 @@ function App() {
                   <span className="text-[10px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-bold shrink-0">{r.reportType}</span>
                 </div>
                 <div className="text-xs text-slate-500 mt-0.5">
-                  {fmtDateJa(r.deliveryDate)}　写真{r.sets.filter(s => s.photoId).length}枚　貸与{sm.rental}件/特定{sm.specific}件　{sm.units.toLocaleString()}単位
+                  {fmtDateJa(r.deliveryDate)}　明細{r.sets.length}件　写真{r.sets.filter(s => s.photoId).length}枚
                 </div>
               </div>
               <button className="text-slate-400 hover:text-teal-600 p-2.5" title="複製" onClick={() => duplicateReport(r)}><Copy size={18} /></button>
@@ -1762,19 +1832,30 @@ function App() {
       )}
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mt-4">
-        <h2 className="text-sm font-bold text-slate-700 mb-2">商品マスタ（学習済み {master.length} 件）</h2>
-        <p className="text-xs text-slate-500 mb-2">保存やPDF取込のたびに自動で貯まります。商品名を入力すると TAIS・単位数が自動補完されます。</p>
-        <div className="max-h-64 overflow-y-auto divide-y divide-slate-100">
-          {master.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(m => (
-            <div key={m.name} className="flex items-center gap-2 py-1.5 text-xs">
-              <span className="flex-1 min-w-0 truncate font-bold text-slate-700">{m.name}</span>
-              <span className="text-slate-400 tabular-nums shrink-0">{m.tais || '―'}</span>
-              <span className="text-slate-500 tabular-nums w-20 text-right shrink-0">
-                {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units}単位`) : ''}
-              </span>
-              <button className="text-slate-300 hover:text-rose-600 shrink-0 p-2 -my-1" title="マスタから削除"
-                onClick={() => { if (confirm(`商品マスタから「${m.name}」を削除しますか？`)) setMaster(list => list.filter(x => x.name !== m.name)); }}>
-                <X size={16} /></button>
+        <div className="flex items-center mb-2">
+          <h2 className="text-sm font-bold text-slate-700">商品マスタ（{master.length} 件・種目別）</h2>
+          {master.length > 0 && (
+            <button className="ml-auto text-[11px] text-slate-400 hover:text-rose-600"
+              onClick={() => { if (confirm(`商品マスタを全部削除しますか？（${master.length}件）`)) setMaster([]); }}>すべて削除</button>
+          )}
+        </div>
+        <p className="text-xs text-slate-500 mb-2">覚えるのは<b>商品名</b>だけです。保存やPDF取込のたびに自動で貯まり、商品名を入力すると TAIS・単位数が自動補完されます。</p>
+        <div className="max-h-72 overflow-y-auto border border-slate-100 rounded-md">
+          {masterGroups.map(g => (
+            <div key={g.item}>
+              <div className="sticky top-0 bg-slate-100 text-slate-600 text-[11px] font-bold px-3 py-1">{g.item}（{g.items.length}）</div>
+              {g.items.map(m => (
+                <div key={m.name} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-slate-50">
+                  <span className="flex-1 min-w-0 truncate font-bold text-slate-700">{m.name}</span>
+                  <span className="text-slate-400 tabular-nums shrink-0">{m.tais || '―'}</span>
+                  <span className="text-slate-500 tabular-nums w-20 text-right shrink-0">
+                    {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units}単位`) : ''}
+                  </span>
+                  <button className="text-slate-300 hover:text-rose-600 shrink-0 p-2 -my-1" title="マスタから削除"
+                    onClick={() => { if (confirm(`商品マスタから「${m.name}」を削除しますか？`)) setMaster(list => list.filter(x => x.name !== m.name)); }}>
+                    <X size={16} /></button>
+                </div>
+              ))}
             </div>
           ))}
           {!master.length && <p className="text-xs text-slate-400 py-3 text-center">まだ学習した商品はありません</p>}
@@ -1782,9 +1863,6 @@ function App() {
       </div>
     </div>
   );
-
-  // 集計はsetsが変わったときだけ再計算（1文字入力ごとのfilter/reduceを避ける）
-  const sm = useMemo(() => (report ? reportSummary(report) : null), [report && report.sets]);
 
   // ---- 編集 ----
   const renderEdit = () => {
@@ -1862,12 +1940,6 @@ function App() {
               <input className={inputCls} value={report.staff}
                 onChange={e => updateReport({ staff: e.target.value })} />
             </div>
-            <div className="flex items-end">
-              <div className="text-xs text-slate-600 bg-blue-50 border border-blue-200 rounded-md px-2.5 py-2 w-full tabular-nums">
-                貸与 <b>{sm.rental}</b> 件／特定 <b>{sm.specific}</b> 件　<b>{sm.units.toLocaleString()}</b> 単位
-                {sm.sales > 0 && <>　販売 <b>¥{sm.sales.toLocaleString()}</b></>}
-              </div>
-            </div>
           </div>
         </section>
 
@@ -1889,10 +1961,19 @@ function App() {
               <Sparkles size={16} /> AIで全写真を認識
             </button>
           )}
-          <p className={`col-span-2 ${AI_ENABLED ? 'md:col-span-4' : 'md:col-span-3'} text-[11px] text-slate-500 leading-relaxed`}>
-            PDF取込＝レンタル単位数報告書やカタログから、商品名・TAISコード・単位数を自動入力します
-            {AI_ENABLED && '／AI認識＝写真から商品情報を自動入力'}
-            {AI_ENABLED && !settings.apiKey && '（AI機能は設定画面でAPIキーを登録すると使えます）'}
+        </section>
+
+        {/* 手入力・マスタからの追加 */}
+        <section className="mt-2 grid grid-cols-2 gap-2">
+          <button className={`${btn('teal')} justify-center`} onClick={openMasterPick}>
+            <BookOpen size={16} /> マスタから選ぶ
+          </button>
+          <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
+            <PackagePlus size={16} /> 特定福祉用具を追加
+          </button>
+          <p className="col-span-2 text-[11px] text-slate-500 leading-relaxed">
+            マスタから選ぶ＝過去に使った商品名をチェックして報告書へ一括追加／
+            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため、このボタンから追加してください
           </p>
         </section>
 
@@ -2033,6 +2114,51 @@ function App() {
     </div>
   );
 
+  // ---- マスタから選ぶダイアログ（種目別・チェックで報告書へ追加） ----
+  const renderMasterPick = () => {
+    const count = Object.values(masterPick).filter(Boolean).length;
+    return (
+      <div className="fixed inset-0 z-[70] bg-slate-900/60 flex items-center justify-center p-3">
+        <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+            <BookOpen size={17} className="text-teal-600" />
+            <div className="flex-1 min-w-0">
+              <h2 className="text-sm font-bold text-slate-800">マスタから選ぶ</h2>
+              <p className="text-[11px] text-slate-500">チェックした商品を報告書に追加します（種目別）</p>
+            </div>
+            <button className="text-slate-400 hover:text-slate-600 p-1" onClick={() => setMasterPick(null)}><X size={18} /></button>
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {masterGroups.map(g => (
+              <div key={g.item}>
+                <div className="sticky top-0 bg-teal-50 text-teal-800 text-xs font-bold px-4 py-1.5 border-y border-teal-100">
+                  {g.item}（{g.items.length}）
+                </div>
+                {g.items.map(m => (
+                  <label key={m.name} className="flex items-center gap-2.5 px-4 py-2 hover:bg-teal-50/60 cursor-pointer border-b border-slate-50">
+                    <input type="checkbox" className="w-4 h-4 accent-teal-600 shrink-0" checked={!!masterPick[m.name]}
+                      onChange={e => setMasterPick(p => ({ ...p, [m.name]: e.target.checked }))} />
+                    <span className="flex-1 min-w-0 text-sm text-slate-800 truncate font-bold">{m.name}</span>
+                    <span className="text-xs text-slate-500 tabular-nums shrink-0">{m.tais || '―'}</span>
+                    <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">
+                      {m.units ? (m.category === CATEGORY_SPECIFIC ? `¥${m.units.toLocaleString()}` : `${m.units.toLocaleString()}単位`) : ''}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="p-3 border-t border-slate-200 flex gap-2">
+            <button className={`${btn('slate')} flex-1 justify-center`} onClick={() => setMasterPick(null)}>キャンセル</button>
+            <button className={`${btn('teal')} flex-[2] justify-center`} onClick={applyMasterPick}>
+              <Plus size={16} /> 選択した{count > 0 ? `${count}件` : '商品'}を報告書へ追加
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ---- 印刷プレビュー ----
   const renderPrintOverlay = () => {
     // 未入力でもプレビューは開ける。提出前に気づけるよう不足項目だけ知らせる
@@ -2108,6 +2234,7 @@ function App() {
       {view === 'settings' && renderSettings()}
       {view === 'edit' && report && renderEdit()}
       {pdfCands && renderPdfCands()}
+      {masterPick && renderMasterPick()}
       {printOpen && renderPrintOverlay()}
       <BusyOverlay busy={busy} />
       <Toast toast={toast} />
