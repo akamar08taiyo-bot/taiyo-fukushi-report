@@ -2633,8 +2633,17 @@ function App() {
             </div>
             <div>
               <label className={labelCls}>担当者（自社）</label>
-              <input className={inputCls} value={report.staff}
-                onChange={e => updateReport({ staff: e.target.value })} />
+              {/* 入力し終えた時点でこの端末の担当者として記憶する。
+                  記憶しても案件ごとに自由に書き換えられる（この欄が常に優先） */}
+              <input className={inputCls} value={report.staff} placeholder="例：久保 匠史"
+                onChange={e => updateReport({ staff: e.target.value })}
+                onBlur={e => {
+                  const v = e.target.value.trim();
+                  if (v && v !== settings.staff) {
+                    setSettings(s => ({ ...s, staff: v }));
+                    showToast(`この端末の担当者を「${v}」として記憶しました`);
+                  }
+                }} />
             </div>
           </div>
         </section>
