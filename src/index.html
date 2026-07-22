@@ -130,14 +130,60 @@ const CATEGORY_SHORT = {
 
 const REPORT_TYPES = ['納品', 'モニタリング', '入替・変更', '相談', 'デモ機貸出'];
 
-// 報告事項の定型文（タップで挿入）
-const TEMPLATE_PHRASES = [
-  '本日、上記福祉用具を納品いたしました。設置場所・高さを調整し、動作確認を行いました。',
-  'ご本人・ご家族へ使用方法および注意事項を説明し、ご理解いただきました。',
-  '身体状況に適合していることを確認いたしました。今後も定期的にモニタリングを実施いたします。',
-  '使用状況を確認いたしました。特に不具合なく、安全にご使用いただいております。',
-  '福祉用具の状態を点検し、消耗・不具合がないことを確認いたしました。',
-  'ご不明な点がございましたら、下記担当までお気軽にお問い合わせください。',
+// 報告事項の定型文（報告区分ごとに分類。タップで挿入）
+const TEMPLATE_GROUPS = [
+  {
+    group: '納品', items: [
+      '本日、上記福祉用具を納品いたしました。設置場所・高さを調整し、動作確認を行いました。',
+      'ご本人・ご家族へ使用方法および注意事項を説明し、ご理解いただきました。',
+      '身体状況に適合していることを確認いたしました。今後も定期的にモニタリングを実施いたします。',
+      '設置に際し、動線および転倒リスクを確認のうえ、安全な位置に設置いたしました。',
+      'ご本人に実際にご使用いただき、無理なく操作できることを確認いたしました。',
+      '住宅環境（段差・手すり位置・扉の開閉）を確認し、支障がないことを確認いたしました。',
+      'ご家族へお手入れ方法および故障時のご連絡先をお伝えいたしました。',
+      '取扱説明書をお渡しし、保管場所をご案内いたしました。',
+    ],
+  },
+  {
+    group: 'モニタリング', items: [
+      '使用状況を確認いたしました。特に不具合なく、安全にご使用いただいております。',
+      '福祉用具の状態を点検し、消耗・不具合がないことを確認いたしました。',
+      '前回訪問時から身体状況に大きな変化はなく、現在の用具が適合しております。',
+      'ご本人・ご家族から使用上のお困りごとは伺っておりません。',
+      '使用頻度を確認したところ、日常的にご活用いただいております。',
+      '消耗部品に劣化が見られたため、次回訪問時に交換を予定しております。',
+      '身体状況の変化に伴い、用具の再選定をご提案させていただきます。',
+      '設置位置を使いやすい高さへ再調整いたしました。',
+      '引き続き月1回のモニタリングを継続いたします。',
+    ],
+  },
+  {
+    group: '入替・変更', items: [
+      '身体状況の変化に伴い、上記のとおり福祉用具を入れ替えいたしました。',
+      'ご本人・ケアマネジャーとご相談のうえ、より適合する機種へ変更いたしました。',
+      '従来品を引き取り、新しい用具の設置・動作確認を行いました。',
+      '変更後の使用方法についてご本人・ご家族へご説明いたしました。',
+      'サイズが合わなくなったため、適切なサイズへ変更いたしました。',
+    ],
+  },
+  {
+    group: '相談・デモ', items: [
+      'ご相談をいただき、現地にて住宅環境および身体状況を確認いたしました。',
+      'デモ機をお持ちし、実際にお試しいただきました。',
+      'お試しの結果を踏まえ、あらためて機種のご提案をさせていただきます。',
+      '候補となる用具のカタログをお渡しいたしました。',
+      '導入時期についてはケアマネジャーとご相談のうえ決定いたします。',
+    ],
+  },
+  {
+    group: '共通・結び', items: [
+      'ご不明な点がございましたら、下記担当までお気軽にお問い合わせください。',
+      '今後とも安全にご使用いただけるよう努めてまいります。',
+      '引き続きどうぞよろしくお願いいたします。',
+      '次回訪問は翌月を予定しております。',
+      'ご不便をおかけしましたことをお詫び申し上げます。',
+    ],
+  },
 ];
 
 // ===== ユーティリティ =====
@@ -213,10 +259,11 @@ const sanitizeImportedReport = (r) => ({
   reportType: REPORT_TYPES.includes(r && r.reportType) ? r.reportType : '納品',
   remarks: sanStr(r && r.remarks, 4000),
   sets: Array.isArray(r && r.sets) ? r.sets.slice(0, 100).map(sanitizeImportedSet) : [],
-  showTotal: !!(r && r.showTotal),
+  showRemarks: !!(r && r.showRemarks),
   showImportTable: r && r.showImportTable !== undefined ? !!r.showImportTable : true,
   highlightDelivered: r && r.highlightDelivered !== undefined ? !!r.highlightDelivered : true,
   importSource: sanStr(r && r.importSource, 120),
+  importMonths: Array.isArray(r && r.importMonths) ? r.importMonths.slice(0, 4).map(x => sanStr(x, 8)) : [],
   importedRows: Array.isArray(r && r.importedRows) ? r.importedRows.slice(0, 300).map(x => ({
     productName: sanStr(x && x.productName, 120),
     tais: sanStr(x && x.tais, 20),
@@ -224,6 +271,9 @@ const sanitizeImportedReport = (r) => ({
     kubun: sanStr(x && x.kubun, 12),
     item: sanStr(x && x.item, 60),
     category: CATEGORIES.includes(x && x.category) ? x.category : '',
+    rate: sanStr(x && x.rate, 8),
+    m1Units: toInt(x && x.m1Units),
+    m2Units: toInt(x && x.m2Units),
   })) : [],
   updatedAt: toInt(r && r.updatedAt) || Date.now(),
 });
@@ -577,11 +627,18 @@ const HEADER_PATTERNS = [
 ];
 // 値として不適切な語（ラベルの続きを誤って拾わないため）
 const BAD_HEADER_VALUE = /^(様|名|殿|欄|印|氏名|なし|無し|以下|上記|該当)$/;
+// 表の見出しセル（値ではない）。「お客様名｜住所｜電話番号」のように
+// ラベルが横並びの様式で、右隣のラベルを値と誤認しないために使う。
+const HEADER_CELL_WORD = /^(住所|電話番号|電話|TEL|FAX|保険者番号|保険者|被保険者番号|給付率|数量|品名|区分|料金|日数|単位数|内容|対応|サービス名|TAISコード|レンタル開始日|レンタル終了日)$/i;
+const isHeaderCell = (t) => {
+  const s = String(t || '').replace(/[\s　:：]/g, '');
+  return !!headerLabelOf(s) || HEADER_CELL_WORD.test(s);
+};
 
 // テキストが「ラベルだけ」かを判定（セル/span単位）
 const headerLabelOf = (t) => {
   const s = String(t || '').replace(/[\s　:：]/g, '');
-  if (/^(ご利用者名|ご利用者|被保険者名|被保険者|利用者名|利用者)$/.test(s)) return 'clientName';
+  if (/^(ご利用者名|ご利用者|被保険者名|被保険者|利用者名|利用者|お客様名|お客さま名|顧客名)$/.test(s)) return 'clientName';
   if (/^(居宅介護支援事業所|居宅介護支援事業者|居宅事業所|支援事業所|事業所名|居宅)$/.test(s)) return 'cmOffice';
   if (/^(担当ケアマネジャー|担当ケアマネージャー|ケアマネジャー|ケアマネージャー|介護支援専門員|担当ケアマネ|ケアマネ)$/.test(s)) return 'careManager';
   if (/^(弊社担当者|弊社担当|自社担当|担当営業|営業担当)$/.test(s)) return 'staff';
@@ -593,16 +650,52 @@ function parseReportHeader(spans) {
   // 先に「ラベルだけのセル → 隣（右 or 次）の値」を拾う。
   // 正規表現を先に走らせると、"居宅介護支援事業所" が短い "居宅" にマッチして
   // 残りの "介護支援事業所" を値と誤認するため、この順序が重要。
+  const cleanValue = (t) => String(t || '').replace(/^[:：\s　]+/, '').replace(/[様殿]\s*$/, '').trim();
   spans.forEach((sp, i) => {
     const key = headerLabelOf(sp.text);
     if (!key || found[key]) return;
-    const cand = spans
+    // ① 同じ行の右隣（ただし「住所」等の見出しセルなら値ではないので採用しない）
+    let cand = spans
       .filter(o => o !== sp && o.page === sp.page && Math.abs(o.y - sp.y) <= 4 && o.x > sp.x)
-      .sort((a, b) => a.x - b.x)[0] || spans[i + 1];
+      .sort((a, b) => a.x - b.x)[0];
+    if (cand && isHeaderCell(cand.text)) cand = null;
+    // ② 表形式（見出しの真下に値）。yは上方向が正なので「下」は y が小さい側。
+    if (!cand) {
+      cand = spans
+        .filter(o => o.page === sp.page && o.y < sp.y && sp.y - o.y <= 24 && Math.abs(o.x - sp.x) <= 70
+                     && !isHeaderCell(o.text))
+        .sort((a, b) => (sp.y - a.y) - (sp.y - b.y))[0];
+    }
+    if (!cand) cand = spans[i + 1];
     if (!cand) return;
-    const v = cand.text.replace(/^[:：\s　]+/, '').replace(/[様殿]\s*$/, '').trim();
-    if (v && !BAD_HEADER_VALUE.test(v) && !headerLabelOf(cand.text)) found[key] = v.slice(0, 30);
+    const v = cleanValue(cand.text);
+    if (v && !BAD_HEADER_VALUE.test(v) && !isHeaderCell(cand.text)) found[key] = v.slice(0, 30);
   });
+
+  // ラベルが無い「宛先ブロック」（用紙左上）から居宅名・ケアマネ名を拾う。
+  // 例) 苅田町地域包括支援センターおばせ / 長谷川　晴美 様
+  if (!found.cmOffice || !found.careManager) {
+    const page1 = spans.filter(s => s.page === 1);
+    const topY = Math.max(...page1.map(s => s.y), 0);
+    const head = page1
+      .filter(s => s.x < 220 && s.y > topY - 130)     // 左上の宛先エリア
+      .sort((a, b) => b.y - a.y);                     // 上から順
+    for (const s of head) {
+      const t = s.text.trim();
+      if (!found.cmOffice && /(包括支援センター|居宅介護支援|ケアプラン|介護支援事業所|支援センター)/.test(t)
+          && !/太陽|シルバー|ｼﾙﾊﾞｰ/.test(t)) {
+        found.cmOffice = t.slice(0, 30);
+      }
+      // 「氏名 様」形式の宛名＝ケアマネジャー（会社名・利用者名は除く）
+      if (!found.careManager && /[様]\s*$/.test(t)) {
+        const v = cleanValue(t);
+        if (v && v.length <= 12 && !/(株式会社|有限会社|センター|事業所|太陽|ｼﾙﾊﾞｰ)/.test(v)
+            && v !== found.clientName) {
+          found.careManager = v;
+        }
+      }
+    }
+  }
   // 次に「ラベル：値」が1つのテキストに収まっているケース
   for (const sp of spans) {
     if (headerLabelOf(sp.text)) continue; // ラベル単独は上で処理済み
@@ -618,24 +711,48 @@ function parseReportHeader(spans) {
 }
 
 function parseRentalUnitReport(spans) {
-  // 同一y座標＝同一視覚行としてまとめ、ページ順・上から下へ並べる
+  // ① 同一y座標＝同一spanグループにまとめる
   const rowMap = new Map();
   for (const sp of spans) {
     const key = sp.page + ':' + sp.y;
     if (!rowMap.has(key)) rowMap.set(key, { page: sp.page, y: sp.y, items: [] });
     rowMap.get(key).items.push(sp);
   }
-  const rows = [...rowMap.values()]
+  const raw = [...rowMap.values()]
     .map(r => ({ page: r.page, y: r.y, items: r.items.slice().sort((a, b) => a.x - b.x) }))
     .sort((a, b) => a.page - b.page || b.y - a.y);
 
+  // ② 見た目の1行を復元する。実物のPDFでは
+  //    「種目名」と「TAISコード」／「商品名」と「数値列」が
+  //    数pt ずれた別の行として取れることがあるため、6pt 以内は同じ行として束ねる。
+  const rows = [];
+  for (const r of raw) {
+    const last = rows[rows.length - 1];
+    if (last && last.page === r.page && last.y - r.y <= 6) {
+      last.items = last.items.concat(r.items).sort((a, b) => a.x - b.x);
+      last.y = Math.min(last.y, r.y);
+    } else {
+      rows.push({ page: r.page, y: r.y, items: r.items.slice() });
+    }
+  }
+  const lineText = (r) => r.items.map(s => s.text).join(' ').replace(/\s+/g, ' ').trim();
+
+  // ③ 単位数の列見出し（例 7月・8月）。見出し行の「7月」「8月」を左から拾う
+  let months = [];
+  for (const r of rows) {
+    const ms = r.items.filter(it => /^\d{1,2}月$/.test(it.text.trim()));
+    if (ms.length >= 1 && ms.length <= 3) {
+      months = ms.slice().sort((a, b) => a.x - b.x).map(it => it.text.trim());
+      break;
+    }
+  }
+
   const cands = [];
   for (let i = 0; i < rows.length; i++) {
-    const texts = rows[i].items.map(s => s.text);
-    const tm = texts.join(' ').match(TAIS_RE);
+    const tm = lineText(rows[i]).match(TAIS_RE);
     if (!tm) continue;
     // 種目行の判定: TAISを除いた文字列に「○○貸与/販売」があること
-    const label = texts.map(t => t.replace(TAIS_RE, '')).join('').replace(/[\s　]/g, '').trim();
+    const label = rows[i].items.map(s => s.text.replace(TAIS_RE, '')).join('').replace(/[\s　]/g, '').trim();
     if (!/(貸与|販売|購入)/.test(label)) continue;
     const norm = normalizeItemLabel(label);
     if (!norm) continue;
@@ -646,7 +763,7 @@ function parseRentalUnitReport(spans) {
 
     // 商品行は「商品名＋数値列」。PDFによっては列が1つのテキストとして繋がって
     // 取得されるため、span単位ではなく**文字列**として切り分ける。
-    const rowText = next.items.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+    const rowText = lineText(next);
 
     // 区分（納品/引取…）の位置で切る。区分が無ければ「独立した数値」の位置で切る
     // （「2型」のように数字が商品名に含まれる場合を誤検出しないよう、前後が区切りの数値のみ対象）
@@ -660,22 +777,31 @@ function parseRentalUnitReport(spans) {
     const productName = (cut >= 0 ? rowText.slice(0, cut) : rowText).trim();
     if (!productName) continue;
 
+    // 数値列の並びは 〔区分 数量 料金 料金区分 単価 (日数 単位数)×月数〕。
+    // 「半月／月額」より後ろの数値を [単価, 日数, 単位数, 日数, 単位数] とみなす。
     const dataText = cut >= 0 ? rowText.slice(cut) : '';
-    const nums = dataText.match(/\d[\d,]*/g) || [];
-    const units = nums.length ? toInt(nums[nums.length - 1]) : 0; // 最後の数値＝月額単位数
+    const rateM = dataText.match(/(半月|月額|日割)/);
+    const rate = rateM ? rateM[1] : '';
+    const tail = rateM ? dataText.slice(rateM.index + rateM[1].length) : '';
+    const tailNums = (tail.match(/\d[\d,]*/g) || []).map(toInt);
+    const allNums = (dataText.match(/\d[\d,]*/g) || []).map(toInt);
+    const m1 = tailNums.length >= 3 ? tailNums[2] : 0;   // 当月（半月なら日割り）分
+    const m2 = tailNums.length >= 5 ? tailNums[4] : 0;   // 翌月分
+    const units = m2 || m1 || (allNums.length ? allNums[allNums.length - 1] : 0);
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
 
     cands.push({
       productName: productName.slice(0, 60),
-      maker: '',                       // メーカー名は取得しない（不要との運用方針）
       tais: `${tm[1]}-${tm[2]}`,
-      units,
+      units,                           // 明細に入れる代表値（翌月分があればそれ）
+      m1Units: m1, m2Units: m2,        // 月ごとの単位数（帳票の一覧表用）
+      rate,                            // 半月／月額
       item: norm.item,
       category: norm.category,
       kubun,
     });
   }
-  return cands;
+  return { cands, months };
 }
 
 // TAISコード・単位数の出現位置から、空間的（同ページ・同カラム・近傍）に
@@ -959,11 +1085,12 @@ const emptyReport = (settings) => ({
   reportType: '納品',
   remarks: '',
   sets: [],
-  showTotal: false,        // 合計単位数を帳票に出すか（既定はOFF）
+  showRemarks: false,      // 報告事項を帳票に載せるか（既定はOFF）
   importedRows: [],        // 取り込んだ単位数報告書の全行（2枚目の一覧表用）
+  importMonths: [],        // 単位数の列見出し（例 ['7月','8月']）
   showImportTable: true,   // 取込一覧表を帳票に付けるか
   highlightDelivered: true,// 一覧表で納品分に色を付けるか
-  importSource: '',        // 取込元ファイル名
+  importSource: '',        // 取込元ファイル名（画面表示用。帳票には印字しない）
   updatedAt: Date.now(),
 });
 
@@ -1013,9 +1140,10 @@ function buildPrintHTML(report, photoMap) {
   // 報告事項の行数を見積もり、1ページ目に載せるカード行数を動的に決める
   // （長文の報告事項でカードがA4末尾からはみ出すのを防ぐ）
   const sets = report.sets;
-  const remarksLines = (report.remarks || '').split('\n')
-    .reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 52)), 0);
-  const remarksMm = Math.max(14, remarksLines * 5.3) + 9;  // 本文(9.5pt×1.55≈5.2mm/行) + 見出し・枠
+  const remarksLines = report.showRemarks
+    ? (report.remarks || '').split('\n').reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 52)), 0)
+    : 0;
+  const remarksMm = report.showRemarks ? Math.max(14, remarksLines * 5.3) + 9 : 0; // 本文(≈5.2mm/行)+枠
   const page1Avail = 272 - 44 - 13 - remarksMm;            // 用紙内寸 - ヘッダー - サマリー
   const ROW_MM = 78;                                       // カード1行分（写真52mm+キャプション+gap）
   const page1Rows = Math.max(0, Math.min(2, Math.floor(page1Avail / ROW_MM)));
@@ -1048,12 +1176,12 @@ function buildPrintHTML(report, photoMap) {
     <div class="psummary">
       <span class="ptype">${e(report.reportType)}</span>
       <span>納品日：${e(fmtDateJa(report.deliveryDate) || '　　　年　月　日')}</span>
-      ${report.showTotal ? `<span class="punits">合計 ${units.toLocaleString()} 単位${sales ? `　／　販売 ¥${sales.toLocaleString()}` : ''}</span>` : ''}
     </div>
+    ${report.showRemarks ? `
     <div class="premarks">
       <div class="premarks-title">報告事項</div>
       <div class="premarks-body">${e(report.remarks || '').replace(/\n/g, '<br>') || '　'}</div>
-    </div>`;
+    </div>` : ''}`;
 
   const headerCont = (pno) => `
     <div class="phead-cont">
@@ -1073,10 +1201,31 @@ function buildPrintHTML(report, photoMap) {
   }
   const totalPages = pages.length + tableChunks.length;
 
-  const tableHTML = (chunk, ci) => `
+  // 単位数の列見出し（例 7月・8月）。取れていない場合は「単位数」1列で出す。
+  const months = Array.isArray(report.importMonths) ? report.importMonths : [];
+  const hasM2 = rows.some(r => toInt(r.m2Units) > 0);
+  const m1Head = months[0] || '単位数';
+  const m2Head = months[1] || '単位数';
+  const unitOf = (r, which) => {
+    const v = which === 1 ? toInt(r.m1Units) : toInt(r.m2Units);
+    // 月別が取れていない行は代表値を1列目に出す
+    if (!v && which === 1 && !toInt(r.m2Units)) return toInt(r.units);
+    return v;
+  };
+  const sum1 = rows.reduce((a, r) => a + unitOf(r, 1), 0);
+  const sum2 = rows.reduce((a, r) => a + unitOf(r, 2), 0);
+
+  const tableHTML = (chunk, isLast) => `
     <table class="ptable">
-      <colgroup><col style="width:8%"><col style="width:44%"><col style="width:20%"><col style="width:16%"><col style="width:12%"></colgroup>
-      <thead><tr><th>区分</th><th>商品名</th><th>TAISコード</th><th>種目</th><th>単位数</th></tr></thead>
+      <colgroup>
+        <col style="width:8%"><col style="width:${hasM2 ? 30 : 38}%"><col style="width:17%">
+        <col style="width:${hasM2 ? 13 : 17}%"><col style="width:9%">
+        <col style="width:${hasM2 ? 11 : 11}%">${hasM2 ? '<col style="width:12%">' : ''}
+      </colgroup>
+      <thead><tr>
+        <th>区分</th><th>商品名</th><th>TAISコード</th><th>種目</th><th>料金区分</th>
+        <th>${e(m1Head)}</th>${hasM2 ? `<th>${e(m2Head)}</th>` : ''}
+      </tr></thead>
       <tbody>
         ${chunk.map(r => `
         <tr class="${report.highlightDelivered && isDelivered(r) ? 'prow-hit' : ''}">
@@ -1084,8 +1233,16 @@ function buildPrintHTML(report, photoMap) {
           <td class="pc-name">${e(r.productName || '')}</td>
           <td class="pc-center">${e(r.tais || '―')}</td>
           <td class="pc-center">${e(r.item || '')}</td>
-          <td class="pc-num">${toInt(r.units) ? toInt(r.units).toLocaleString() : '―'}</td>
+          <td class="pc-center">${e(r.rate || '―')}</td>
+          <td class="pc-num">${unitOf(r, 1) ? unitOf(r, 1).toLocaleString() : '―'}</td>
+          ${hasM2 ? `<td class="pc-num">${unitOf(r, 2) ? unitOf(r, 2).toLocaleString() : '―'}</td>` : ''}
         </tr>`).join('')}
+        ${isLast ? `
+        <tr class="prow-total">
+          <td class="pc-center" colspan="5">合　計</td>
+          <td class="pc-num">${sum1.toLocaleString()}</td>
+          ${hasM2 ? `<td class="pc-num">${sum2.toLocaleString()}</td>` : ''}
+        </tr>` : ''}
       </tbody>
     </table>`;
 
@@ -1107,10 +1264,9 @@ function buildPrintHTML(report, photoMap) {
         ${headerCont()}
         <div class="ptable-title">
           レンタル単位数報告書 一覧${tableChunks.length > 1 ? `（${ci + 1}/${tableChunks.length}）` : ''}
-          ${report.importSource ? `<span class="ptable-src">取込元：${e(report.importSource)}</span>` : ''}
         </div>
         ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回納品した用具</div>' : ''}
-        ${tableHTML(chunk, ci)}
+        ${tableHTML(chunk, ci === tableChunks.length - 1)}
         <div class="pfooter">${pages.length + ci + 1} / ${totalPages} ページ</div>
       </div>
     </div>`).join('');
@@ -1222,6 +1378,10 @@ function buildPrintHTML(report, photoMap) {
     #print-content-holder .ptable tbody tr:nth-child(even) td { background: #f8fbff; }
     #print-content-holder .ptable .prow-hit td {
       background: #fef3c7 !important; font-weight: bold; border-color: #f59e0b;
+    }
+    #print-content-holder .ptable .prow-total td {
+      background: #dbeafe !important; font-weight: bold; color: #1e3a8a;
+      border-color: #93c5fd; font-size: 9.5pt;
     }
     #print-content-holder .pc-center { text-align: center; }
     #print-content-holder .pc-num { text-align: right; }
@@ -1406,6 +1566,7 @@ function App() {
   const dragDepth = useRef(0);
   const [pdfCands, setPdfCands] = useState(null); // {source, items:[{productName,maker,tais,units,checked}]}
   const [pendingDoc, setPendingDoc] = useState(null); // スキャンPDFのAI読み取り待ち
+  const [showImportEdit, setShowImportEdit] = useState(false); // 取込明細の編集表を開くか
   const toastTimer = useRef(null);
   const draftTimer = useRef(null);
   const handleFilesRef = useRef(null); // ドロップ経路から最新のhandleFilesを呼ぶため
@@ -1539,9 +1700,20 @@ function App() {
   };
 
   // 写真実体は消さない（保存前の編集は取り消せる必要がある）。実体回収は起動時GCに一本化
+  // ゴミ箱は確認なしで即削除（保存前なら「読み込み直す」で戻せる）
   const removeSet = useCallback((s) => {
-    if (!confirm('この明細を削除しますか？')) return;
     setReport(r => ({ ...r, updatedAt: Date.now(), sets: r.sets.filter(x => x.id !== s.id) }));
+  }, []);
+
+  // 取り込んだ単位数報告書の1行を編集（単位数の手直し用）
+  const updateImportedRow = useCallback((idx, patch) => {
+    setReport(r => ({
+      ...r, updatedAt: Date.now(),
+      importedRows: r.importedRows.map((row, i) => (i === idx ? { ...row, ...patch } : row)),
+    }));
+  }, []);
+  const removeImportedRow = useCallback((idx) => {
+    setReport(r => ({ ...r, updatedAt: Date.now(), importedRows: r.importedRows.filter((_, i) => i !== idx) }));
   }, []);
 
   const saveReport = () => {
@@ -1717,7 +1889,7 @@ function App() {
 
   // ---- レンタル単位数報告書（PDF）取込 ----
   // 抽出結果を候補ダイアログに載せ、ヘッダー情報（利用者名等）と全行を報告書へ反映
-  const applyExtraction = (cands, header, kind, sourceName) => {
+  const applyExtraction = (cands, header, kind, sourceName, months = []) => {
     const delivered = cands.filter(c => c.kubun === '納品').length;
     setPdfCands({
       source: `${sourceName}（${kind}として読み取り）`,
@@ -1733,9 +1905,11 @@ function App() {
       setReport(r => ({
         ...r, updatedAt: Date.now(),
         importSource: sourceName,
+        importMonths: months,
         importedRows: cands.map(c => ({
           productName: c.productName, tais: c.tais, units: c.units,
           kubun: c.kubun, item: c.item, category: c.category,
+          rate: c.rate || '', m1Units: toInt(c.m1Units), m2Units: toInt(c.m2Units),
         })),
       }));
     }
@@ -1779,12 +1953,14 @@ function App() {
       const buf = await file.arrayBuffer();
       const { spans, doc } = await pdfToLines(buf, setBusy);
       // ① レンタル単位数報告書（表形式）として解釈 → ② 該当なければカタログとして解釈
-      let cands = parseRentalUnitReport(spans);
+      const parsed = parseRentalUnitReport(spans);
+      let cands = parsed.cands;
+      let months = parsed.months;
       let kind = '単位数報告書';
-      if (!cands.length) { cands = parseCandidatesFromLines(spans); kind = 'カタログ'; }
+      if (!cands.length) { cands = parseCandidatesFromLines(spans); months = []; kind = 'カタログ'; }
       if (cands.length) {
         setPendingDoc({ name: file.name, doc }); // 「AIで読み取り直す」用に保持
-        applyExtraction(cands, kind === '単位数報告書' ? parseReportHeader(spans) : null, kind, file.name);
+        applyExtraction(cands, kind === '単位数報告書' ? parseReportHeader(spans) : null, kind, file.name, months);
       } else {
         // テキストが取れない（スキャンPDF等）→ AI読み取りを提案
         setPendingDoc({ name: file.name, doc });
@@ -2326,6 +2502,75 @@ function App() {
               取込済み：{report.importSource}（{report.importedRows.length}行）
             </div>
           )}
+          {!!report.importedRows.length && (
+            <div className="mt-1.5 bg-white rounded-lg border border-slate-200 shadow-sm">
+              <button className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-slate-600"
+                onClick={() => setShowImportEdit(v => !v)}>
+                取り込んだ明細を確認・単位数を編集する
+                <span className="ml-auto text-slate-400">{showImportEdit ? '閉じる ▲' : '開く ▼'}</span>
+              </button>
+              {showImportEdit && (
+                <div className="overflow-x-auto px-2 pb-2">
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-600">
+                        <th className="border border-slate-200 px-1.5 py-1 whitespace-nowrap">区分</th>
+                        <th className="border border-slate-200 px-1.5 py-1 text-left">商品名</th>
+                        <th className="border border-slate-200 px-1.5 py-1 whitespace-nowrap">料金区分</th>
+                        <th className="border border-slate-200 px-1.5 py-1 whitespace-nowrap">{report.importMonths[0] || '当月'}</th>
+                        <th className="border border-slate-200 px-1.5 py-1 whitespace-nowrap">{report.importMonths[1] || '翌月'}</th>
+                        <th className="border border-slate-200 px-1 py-1"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.importedRows.map((row, i) => (
+                        <tr key={i} className={row.kubun === '納品' ? 'bg-amber-50' : ''}>
+                          <td className="border border-slate-200 px-1.5 py-1 text-center whitespace-nowrap">{row.kubun || '－'}</td>
+                          <td className="border border-slate-200 px-1.5 py-1">{row.productName}</td>
+                          <td className="border border-slate-200 px-1.5 py-1 text-center whitespace-nowrap">
+                            <select className="bg-transparent text-[11px]" value={row.rate || ''}
+                              onChange={e => updateImportedRow(i, { rate: e.target.value })}>
+                              <option value="">－</option>
+                              <option value="半月">半月</option>
+                              <option value="月額">月額</option>
+                              <option value="日割">日割</option>
+                            </select>
+                          </td>
+                          <td className="border border-slate-200 px-1 py-1">
+                            <input type="number" inputMode="numeric"
+                              className="w-16 text-right border border-slate-200 rounded px-1 py-0.5"
+                              value={row.m1Units || 0}
+                              onChange={e => updateImportedRow(i, { m1Units: toInt(e.target.value) })} />
+                          </td>
+                          <td className="border border-slate-200 px-1 py-1">
+                            <input type="number" inputMode="numeric"
+                              className="w-16 text-right border border-slate-200 rounded px-1 py-0.5"
+                              value={row.m2Units || 0}
+                              onChange={e => updateImportedRow(i, { m2Units: toInt(e.target.value), units: toInt(e.target.value) || row.units })} />
+                          </td>
+                          <td className="border border-slate-200 px-1 py-1 text-center">
+                            <button className="text-slate-300 hover:text-rose-500" title="この行を削除"
+                              onClick={() => removeImportedRow(i)}><Trash2 size={13} /></button>
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="bg-slate-100 font-bold text-slate-700">
+                        <td className="border border-slate-200 px-1.5 py-1 text-center" colSpan={3}>合　計</td>
+                        <td className="border border-slate-200 px-1.5 py-1 text-right">
+                          {report.importedRows.reduce((a, r) => a + toInt(r.m1Units), 0).toLocaleString()}
+                        </td>
+                        <td className="border border-slate-200 px-1.5 py-1 text-right">
+                          {report.importedRows.reduce((a, r) => a + toInt(r.m2Units), 0).toLocaleString()}
+                        </td>
+                        <td className="border border-slate-200"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p className="text-[10px] text-slate-400 mt-1">※ ここで直した単位数は、帳票2枚目の一覧表にそのまま反映されます。</p>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {/* ステップ2: 写真・明細の追加 */}
@@ -2418,11 +2663,6 @@ function App() {
         <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3">
           <div className="text-[11px] font-bold text-slate-500 mb-2">帳票に載せるもの</div>
           <div className="flex flex-wrap gap-x-5 gap-y-2">
-            <label className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
-              <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!report.showTotal}
-                onChange={e => updateReport({ showTotal: e.target.checked })} />
-              合計単位数を表示する
-            </label>
             <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${report.importedRows.length ? 'text-slate-700' : 'text-slate-300'}`}>
               <input type="checkbox" className="w-4 h-4 accent-blue-600" disabled={!report.importedRows.length}
                 checked={!!report.showImportTable}
@@ -2477,29 +2717,47 @@ function App() {
           </button>
         </section>
 
-        {/* 報告事項 */}
+        {/* 報告事項（既定OFF。チェックを入れると本文入力＋サンプル選択が出る） */}
         <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3.5">
-          <div className="flex items-center gap-2 mb-2">
-            <h2 className="text-sm font-bold text-slate-700">報告事項</h2>
-            {AI_ENABLED && (
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!report.showRemarks}
+                onChange={e => updateReport({ showRemarks: e.target.checked })} />
+              <h2 className="text-sm font-bold text-slate-700">報告事項を記載する</h2>
+            </label>
+            {report.showRemarks && AI_ENABLED && (
               <button className="ml-auto text-[11px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded px-2 py-1 flex items-center gap-1 hover:bg-purple-100"
                 onClick={draftRemarks}><Wand2 size={12} /> AIで下書き</button>
             )}
           </div>
-          <textarea
-            className="w-full border border-slate-300 rounded-md text-sm p-2.5 min-h-[110px] focus:outline-none focus:ring-2 focus:ring-blue-400"
-            value={report.remarks} placeholder="納品・調整・説明の内容、利用状況、ケアマネジャーへの申し送り事項など"
-            onChange={e => updateReport({ remarks: e.target.value })} />
-          <div className="flex flex-wrap gap-1.5 mt-1.5">
-            {TEMPLATE_PHRASES.map((t, i) => (
-              <button key={i}
-                className="text-[11px] text-slate-600 bg-slate-100 hover:bg-blue-100 hover:text-blue-700 rounded-full px-2.5 py-1 border border-slate-200"
-                title={t}
-                onClick={() => updateReport({ remarks: report.remarks ? report.remarks + '\n' + t : t })}>
-                {t.slice(0, 24)}…
-              </button>
-            ))}
-          </div>
+          {!report.showRemarks && (
+            <p className="text-[11px] text-slate-400 mt-1.5">チェックを入れると本文の入力欄と、報告区分ごとのサンプル文が使えます。</p>
+          )}
+          {report.showRemarks && (
+            <>
+              <textarea
+                className="w-full border border-slate-300 rounded-md text-sm p-2.5 min-h-[110px] mt-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                value={report.remarks} placeholder="納品・調整・説明の内容、利用状況、ケアマネジャーへの申し送り事項など"
+                onChange={e => updateReport({ remarks: e.target.value })} />
+              <div className="mt-2 space-y-2">
+                {TEMPLATE_GROUPS.map(g => (
+                  <div key={g.group}>
+                    <div className="text-[11px] font-bold text-slate-500 mb-1">{g.group}</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {g.items.map((t, i) => (
+                        <button key={i}
+                          className="text-[11px] text-slate-600 bg-slate-100 hover:bg-blue-100 hover:text-blue-700 rounded-full px-2.5 py-1 border border-slate-200 text-left"
+                          title={t}
+                          onClick={() => updateReport({ remarks: report.remarks ? report.remarks + '\n' + t : t })}>
+                          {t.length > 26 ? t.slice(0, 26) + '…' : t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </section>
 
         {/* マスタ候補（datalist） */}
@@ -2722,7 +2980,7 @@ function App() {
 
 // デバッグ用フック（localStorageでフラグを立てた端末のみ公開）
 if (localStorage.getItem('taiyo_fukushi_debug') === '1') {
-  window.__debugPdf = { pdfToLines, parseCandidatesFromLines, parseRentalUnitReport, normalizeItemLabel };
+  window.__debugPdf = { pdfToLines, parseCandidatesFromLines, parseRentalUnitReport, parseReportHeader, normalizeItemLabel };
 }
 
 // エラー計測（QAチェック用）
