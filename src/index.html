@@ -1266,7 +1266,7 @@ function buildPrintHTML(report, photoMap) {
       <div class="page">
         ${headerCont()}
         <div class="ptable-title">
-          レンタル単位数報告書 一覧${tableChunks.length > 1 ? `（${ci + 1}/${tableChunks.length}）` : ''}
+          レンタル単位数一覧${tableChunks.length > 1 ? `（${ci + 1}/${tableChunks.length}）` : ''}
         </div>
         ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回納品した用具</div>' : ''}
         ${tableHTML(chunk, ci === tableChunks.length - 1)}
