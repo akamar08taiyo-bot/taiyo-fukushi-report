@@ -2895,7 +2895,8 @@ function App() {
     return (
     <>
       <div className="fixed inset-0 z-[60] bg-slate-700/90 no-print" />
-      <div className="fixed top-3 right-3 z-[80] flex gap-2 no-print">
+      <div className="fixed top-3 z-[80] flex gap-2 no-print"
+        style={{ right: 'calc(12px + var(--preview-sbw, 0px))' }}>
         <button className={btn('sky')} onClick={doPrint}><Printer size={16} /> 印刷</button>
         <button className={btn('indigo')} onClick={savePdf}><FileDown size={16} /> PDF保存</button>
         <button className={btn('rose')} onClick={closePrint}><X size={16} /> 閉じる</button>
@@ -2941,10 +2942,22 @@ function App() {
         width: 'auto', maxWidth: 'none',
       });
       document.body.style.overflow = 'hidden'; // 背面のスクロールを止める
+      // プレビューの縦スクロールバー幅を測り、右上のボタンがバーに食い込まないようにする
+      const setSbw = () => {
+        const w = Math.max(0, holder.offsetWidth - holder.clientWidth);
+        document.documentElement.style.setProperty('--preview-sbw', w + 'px');
+      };
+      setSbw();
+      window.addEventListener('resize', setSbw);
       // 用紙の外（余白）をクリックしたら閉じる
       const onBgClick = (e) => { if (e.target === holder) closePrint(); };
       holder.addEventListener('click', onBgClick);
-      return () => { holder.removeEventListener('click', onBgClick); document.body.style.overflow = ''; };
+      return () => {
+        holder.removeEventListener('click', onBgClick);
+        window.removeEventListener('resize', setSbw);
+        document.documentElement.style.removeProperty('--preview-sbw');
+        document.body.style.overflow = '';
+      };
     } else {
       apply({
         display: '', position: '', top: '', left: '', right: '', bottom: '',
