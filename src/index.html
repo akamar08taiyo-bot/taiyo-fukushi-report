@@ -2606,8 +2606,17 @@ function App() {
             </div>
             <div>
               <label className={labelCls}>営業所</label>
+              {/* 選んだ時点でこの端末の営業所として記憶する（保存を待たない）。
+                  次回の新規作成では最初から入った状態で始まる。 */}
               <select className={inputCls} value={report.office}
-                onChange={e => updateReport({ office: e.target.value })}>
+                onChange={e => {
+                  const v = e.target.value;
+                  updateReport({ office: v });
+                  if (v && v !== settings.office) {
+                    setSettings(s => ({ ...s, office: v }));
+                    showToast(`この端末の営業所を「${v}」として記憶しました`);
+                  }
+                }}>
                 <option value="">（営業所を選択）</option>
                 {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
               </select>
