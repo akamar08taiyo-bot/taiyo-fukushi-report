@@ -3039,7 +3039,7 @@ function App() {
       <div className="fixed inset-0 z-[60] bg-slate-700/90 no-print" />
       {/* 操作ボタンは用紙の左手（画面左上）にまとめて置く。縦積みで押しやすく、
           帳票タイトル「福祉用具相談報告書」の左側に来るようにする */}
-      <div className="fixed top-3 left-2 z-[80] flex flex-col gap-2 no-print">
+      <div className="fixed top-3 left-2 z-[80] flex flex-col gap-1 no-print">
         <button className={`${btn('sky')} justify-center w-20 sm:w-32 px-1.5`} onClick={doPrint}><Printer size={16} /> 印刷</button>
         <button className={`${btn('indigo')} justify-center w-20 sm:w-32 px-1.5`} onClick={savePdf}><FileDown size={16} /> PDF保存</button>
         <button className={`${btn('rose')} justify-center w-20 sm:w-32 px-1.5`} onClick={closePrint}><X size={16} /> 閉じる</button>
