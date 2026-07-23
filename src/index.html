@@ -1468,6 +1468,53 @@ function BusyOverlay({ busy }) {
   );
 }
 
+// ===== 品目コンボ（自由入力＋一覧選択） =====
+// datalistは「入力済みの文字に一致する候補」しか出さないため、一度品目を決めると
+// 一覧から別の品目に変えられなくなる。そこで▼ボタンで常に全件を出す自前の一覧にする。
+function ItemCombo({ value, isSale, onChange }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const groups = isSale ? SPECIFIC_ITEM_GROUPS : [{ label: '', items: RENTAL_ITEMS }];
+  return (
+    <div ref={boxRef} className="relative flex-1 min-w-0">
+      <div className="flex">
+        <input className="h-8 px-2 border border-slate-300 rounded-l text-xs bg-white w-full min-w-0"
+          value={value} placeholder="品目（選択 または 入力）"
+          onChange={e => onChange(e.target.value)} />
+        <button type="button" title="一覧から選ぶ"
+          className="h-8 px-1.5 border border-l-0 border-slate-300 rounded-r bg-slate-50 hover:bg-blue-50 text-slate-500 shrink-0"
+          onClick={() => setOpen(o => !o)}>
+          <ChevronDown size={14} />
+        </button>
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 top-9 z-30 bg-white border border-slate-300 rounded-md shadow-lg max-h-56 overflow-y-auto">
+          {value && (
+            <button type="button" className="w-full text-left px-2.5 py-1.5 text-[11px] text-slate-400 hover:bg-slate-50 border-b border-slate-100"
+              onClick={() => { onChange(''); setOpen(false); }}>（クリアして入力する）</button>
+          )}
+          {groups.map(g => (
+            <div key={g.label || 'all'}>
+              {g.label && <div className="px-2.5 py-1 text-[10px] font-bold text-slate-500 bg-slate-100">{g.label}</div>}
+              {g.items.map(it => (
+                <button key={it} type="button"
+                  className={`w-full text-left px-2.5 py-1.5 text-xs hover:bg-blue-50 ${it === value ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-700'}`}
+                  onClick={() => { onChange(it); setOpen(false); }}>{it}</button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ===== 明細カード =====
 // React.memo: 利用者名や報告事項の入力中に全カード（写真img込み）が
 // 再レンダーされるのを防ぐ。propsのコールバックは親側で参照安定化済み。
@@ -1484,18 +1531,17 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
     },
   };
   return (
-    <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border-b border-slate-200">
+    // overflow-hidden にすると品目一覧のドロップダウンが切れるため、角丸はヘッダー側で処理する
+    <div className="bg-white rounded-lg border border-slate-200 shadow-sm">
+      <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border-b border-slate-200 rounded-t-lg">
         <span className="w-6 h-6 rounded bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
         <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white font-bold"
           value={s.category} onChange={e => onUpdate(s.id, { category: e.target.value, item: '' })}>
           {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_SHORT[c] || c}</option>)}
         </select>
-        {/* 品目は一覧から選ぶ・自由入力のどちらもできる（datalist付きコンボ） */}
-        <input className="h-8 px-2 border border-slate-300 rounded text-xs bg-white flex-1 min-w-0"
-          list={isSale ? 'specific-item-list' : 'rental-item-list'}
-          value={s.item} placeholder="品目（選択 または 入力）"
-          onChange={e => onUpdate(s.id, { item: e.target.value })} />
+        {/* 品目は一覧から選ぶ・自由入力のどちらもできる（▼で常に全件表示） */}
+        <ItemCombo value={s.item} isSale={isSale}
+          onChange={(v) => onUpdate(s.id, { item: v })} />
         <button className="text-slate-400 hover:text-rose-600 shrink-0 p-2" title="明細を削除" onClick={() => onRemove(s)}><Trash2 size={16} /></button>
       </div>
 
@@ -1541,7 +1587,7 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
           </div>
           <select className={inputCls} value={s.place}
             onChange={e => onUpdate(s.id, { place: e.target.value })}>
-            <option value="">納品箇所…</option>
+            <option value="">納品箇所（任意）</option>
             {PLACES.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
@@ -1598,7 +1644,6 @@ function App() {
   const openSnapshotRef = useRef(null); // 開いた時点のJSON（一致する間はドラフト化しない）
   const prevViewRef = useRef('list');   // 設定画面から戻る先
   const fileInputRef = useRef(null);
-  const cameraInputRef = useRef(null);
   const pdfInputRef = useRef(null);
   const importInputRef = useRef(null);
   const attachTargetRef = useRef(null); // 写真をどのカードに付けるか（null=新規カード）
@@ -2407,9 +2452,9 @@ function App() {
     {
       n: 3, badge: 'bg-emerald-600', label: 'text-emerald-700', icon: <Camera size={18} />, title: '写真と明細を足す',
       body: [
-        '「カメラで撮影」でその場で撮るか、「写真を追加」で選びます。パソコンなら画面に写真をドラッグ＆ドロップしてもOKです。',
+        '各明細の「写真を添付」から選ぶか、画面に写真をドラッグ＆ドロップします。Windows＋Shift＋Sで切り取って各明細の「貼り付け」ボタンでも追加できます。',
         '写真は自動で軽くリサイズされるので、枚数が多くても重くなりません。',
-        '各明細の「納品箇所」（玄関・浴室など）を選ぶと報告書に印字されます。',
+        '各明細の「納品箇所」（玄関・浴室など）は任意です。選ぶと報告書に印字されます。',
       ],
     },
     {
@@ -2765,41 +2810,25 @@ function App() {
           <div className="text-[11px] font-bold text-slate-500 mb-1.5">
             <span className="bg-slate-200 text-slate-700 rounded px-1.5 py-0.5 mr-1.5">STEP 3</span>写真と明細を追加
           </div>
-          <div className={`grid grid-cols-2 gap-2 ${AI_ENABLED ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
-            <button className={`${btn('emerald')} justify-center`} onClick={() => { attachTargetRef.current = null; fileInputRef.current?.click(); }}>
-              <ImagePlus size={16} /> 写真を追加
-            </button>
-            <button className={`${btn('teal')} justify-center`} onClick={() => { attachTargetRef.current = null; cameraInputRef.current?.click(); }}>
-              <Camera size={16} /> カメラで撮影
-            </button>
-            <button className={`${btn('cyan')} justify-center`} onClick={openMasterPick}>
-              <BookOpen size={16} /> マスタから選ぶ
-            </button>
-            <button className={`${btn('purple')} justify-center`} onClick={addSpecificItem}>
-              <PackagePlus size={16} /> 特定福祉用具
-            </button>
-            {AI_ENABLED && (
+          {AI_ENABLED && (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
               <button className={`${btn('fuchsia')} justify-center ${!settings.apiKey ? 'opacity-60' : ''}`}
                 title={settings.apiKey ? '未入力の写真カードをAIがまとめて認識します' : 'AI機能は「設定」でAPIキーを入力すると使えます'}
                 onClick={recognizeAll}>
                 <Sparkles size={16} /> AI認識
               </button>
-            )}
-          </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed mt-1.5">
-            マスタから選ぶ＝過去に使った商品名をチェックして一括追加／
-            特定福祉用具（入浴補助用具など）は単位数報告書に載らないため専用ボタンから追加します
-          </p>
-          <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5 mt-1.5 flex items-center gap-1.5">
-            <Clipboard size={13} className="shrink-0" />
-            写真はドラッグ＆ドロップのほか、<b>Windows＋Shift＋S</b> で切り取った画像を <b>Ctrl＋V</b> で貼り付けても追加できます
+            </div>
+          )}
+          <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5 flex items-start gap-1.5 leading-relaxed">
+            <Clipboard size={13} className="shrink-0 mt-0.5" />
+            <span>写真は各明細の「写真を添付」から選ぶか、<b>ドラッグ＆ドロップ</b>／<b>Windows＋Shift＋S</b> で切り取って各明細の<b>「貼り付け」</b>ボタン（<b>Ctrl＋V</b> でも可）で追加できます</span>
           </p>
         </section>
 
         {/* 帳票の表示オプション */}
         <section className="mt-3 bg-white rounded-lg border border-slate-200 shadow-sm p-3">
           <div className="text-[11px] font-bold text-slate-500 mb-2">帳票に載せるもの</div>
-          <div className="flex flex-wrap gap-x-5 gap-y-2">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${report.importedRows.length ? 'text-slate-700' : 'text-slate-300'}`}>
               <input type="checkbox" className="w-4 h-4 accent-blue-600" disabled={!report.importedRows.length}
                 checked={!!report.showImportTable}
@@ -2813,6 +2842,19 @@ function App() {
                 onChange={e => updateReport({ highlightDelivered: e.target.checked })} />
               一覧表で納品分に色を付ける
             </label>
+            {/* 明細の追加手段はここに並べる（チェック欄の横） */}
+            <div className="flex gap-2 ml-auto">
+              <button className="inline-flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-2 rounded-md shadow-sm text-xs font-bold transition"
+                title="過去に使った商品名をチェックして一括追加します"
+                onClick={openMasterPick}>
+                <BookOpen size={14} /> マスタから選ぶ
+              </button>
+              <button className="inline-flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-md shadow-sm text-xs font-bold transition"
+                title="入浴補助用具・腰掛便座など、単位数報告書に載らない販売品を追加します"
+                onClick={addSpecificItem}>
+                <PackagePlus size={14} /> 特定福祉用具
+              </button>
+            </div>
           </div>
         </section>
 
@@ -2901,13 +2943,6 @@ function App() {
         {/* マスタ候補（datalist） */}
         <datalist id="master-list">
           {master.map(m => <option key={m.name} value={m.name} />)}
-        </datalist>
-        {/* 品目候補（選択も自由入力もできるコンボ用） */}
-        <datalist id="rental-item-list">
-          {RENTAL_ITEMS.map(it => <option key={it} value={it} />)}
-        </datalist>
-        <datalist id="specific-item-list">
-          {SPECIFIC_ITEMS.map(it => <option key={it} value={it} />)}
         </datalist>
 
         {/* 下部固定アクションバー */}
@@ -3128,8 +3163,6 @@ function App() {
 
       {/* 非表示のファイル入力 */}
       <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden"
-        onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
-      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden"
         onChange={e => { handleFiles(e.target.files, attachTargetRef.current); e.target.value = ''; }} />
       <input ref={pdfInputRef} type="file" className="hidden"
         accept=".pdf,.xlsx,.xlsm,.csv,.tsv,.txt,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
