@@ -1471,7 +1471,7 @@ function BusyOverlay({ busy }) {
 // ===== 明細カード =====
 // React.memo: 利用者名や報告事項の入力中に全カード（写真img込み）が
 // 再レンダーされるのを防ぐ。propsのコールバックは親側で参照安定化済み。
-const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch, onDropFiles }) {
+const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch, onDropFiles, onPastePhoto }) {
   const isSale = s.category === CATEGORY_SPECIFIC; // 販売品は単位数ではなく価格(円)
   const [over, setOver] = useState(false);
   // このカードに直接ドロップされた写真は、このカードに添付する
@@ -1520,6 +1520,11 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
               <span className="text-[9px] text-slate-400">ドロップ可</span>
             </button>
           )}
+          {/* 切り取った画像（Windows+Shift+S）をこのカードに貼り付ける */}
+          <button className="mt-1.5 w-full text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1 py-1.5 flex items-center justify-center gap-1 hover:bg-emerald-100"
+            onClick={() => onPastePhoto(s.id)} title="Windows＋Shift＋Sで切り取った画像を貼り付けます">
+            <Clipboard size={12} /> {s.photoId ? '写真を貼替え' : '貼り付け'}
+          </button>
           {AI_ENABLED && s.photoId && (
             <button className="mt-1.5 w-full text-[11px] font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded px-1 py-1.5 flex items-center justify-center gap-1 hover:bg-purple-100"
               onClick={() => onRecognize(s)}>
@@ -1934,6 +1939,29 @@ function App() {
   }, []);
   const onDropFilesStable = useCallback((files, setId) => {
     if (handleFilesRef.current) handleFilesRef.current(files, setId);
+  }, []);
+  // クリップボードの画像を、指定した明細カードに貼り付けて添付する
+  // （Windows+Shift+S で切り取り → そのカードの「貼り付け」ボタンを押す）
+  const onPastePhotoStable = useCallback(async (setId) => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.read) {
+        showToast('この端末では貼り付けに未対応です。ドラッグ＆ドロップをご利用ください', 'error');
+        return;
+      }
+      const items = await navigator.clipboard.read();
+      const files = [];
+      for (const it of items) {
+        const type = it.types.find(t => t.startsWith('image/'));
+        if (type) { const blob = await it.getType(type); files.push(new File([blob], 'clip.png', { type: blob.type })); }
+      }
+      if (!files.length) {
+        showToast('クリップボードに画像がありません。Windows＋Shift＋S で切り取ってからお試しください', 'error');
+        return;
+      }
+      if (handleFilesRef.current) handleFilesRef.current(files, setId);
+    } catch (err) {
+      showToast('貼り付けできませんでした。ブラウザの許可を確認するか、ドラッグ＆ドロップをお試しください', 'error');
+    }
   }, []);
 
   // ---- レンタル単位数報告書（PDF）取込 ----
@@ -2816,6 +2844,7 @@ function App() {
               onAttach={onAttachStable}
               onMasterMatch={onMasterMatchStable}
               onDropFiles={onDropFilesStable}
+              onPastePhoto={onPastePhotoStable}
             />
           ))}
 
