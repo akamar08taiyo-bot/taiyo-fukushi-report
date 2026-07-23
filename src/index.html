@@ -1491,21 +1491,11 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
           value={s.category} onChange={e => onUpdate(s.id, { category: e.target.value, item: '' })}>
           {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_SHORT[c] || c}</option>)}
         </select>
-        <select className="h-8 px-1.5 border border-slate-300 rounded text-xs bg-white flex-1 min-w-0"
-          value={s.item} onChange={e => onUpdate(s.id, { item: e.target.value })}>
-          <option value="">品目を選択…</option>
-          {/* PDF取込で標準種目に一致しなかった値も保持して表示する */}
-          {s.item && ![...RENTAL_ITEMS, ...SPECIFIC_ITEMS].includes(s.item) && (
-            <option value={s.item}>{s.item}</option>
-          )}
-          {isSale
-            ? SPECIFIC_ITEM_GROUPS.map(g => (
-                <optgroup key={g.label} label={g.label}>
-                  {g.items.map(it => <option key={it} value={it}>{it}</option>)}
-                </optgroup>
-              ))
-            : RENTAL_ITEMS.map(it => <option key={it} value={it}>{it}</option>)}
-        </select>
+        {/* 品目は一覧から選ぶ・自由入力のどちらもできる（datalist付きコンボ） */}
+        <input className="h-8 px-2 border border-slate-300 rounded text-xs bg-white flex-1 min-w-0"
+          list={isSale ? 'specific-item-list' : 'rental-item-list'}
+          value={s.item} placeholder="品目（選択 または 入力）"
+          onChange={e => onUpdate(s.id, { item: e.target.value })} />
         <button className="text-slate-400 hover:text-rose-600 shrink-0 p-2" title="明細を削除" onClick={() => onRemove(s)}><Trash2 size={16} /></button>
       </div>
 
@@ -2562,11 +2552,18 @@ function App() {
             </div>
           )}
           {!!report.importedRows.length && (
-            <div className="mt-1.5 bg-white rounded-lg border border-slate-200 shadow-sm">
-              <button className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-slate-600"
+            <div className="mt-1.5 bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+              <button className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition ${showImportEdit ? 'bg-indigo-50' : 'bg-slate-50 hover:bg-indigo-50'}`}
                 onClick={() => setShowImportEdit(v => !v)}>
-                取り込んだ明細を確認・単位数を編集する
-                <span className="ml-auto text-slate-400">{showImportEdit ? '閉じる ▲' : '開く ▼'}</span>
+                <span className="bg-indigo-600 text-white rounded-md p-1.5 shrink-0"><ClipboardList size={16} /></span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-xs font-bold text-slate-800">取り込んだ明細を編集する</span>
+                  <span className="block text-[11px] text-slate-500">商品名・区分・単位数などを直したり、不要な行を消せます（{report.importedRows.length}行）</span>
+                </span>
+                <span className="ml-auto shrink-0 flex items-center gap-1 text-[11px] font-bold text-indigo-600">
+                  {showImportEdit ? '閉じる' : '編集する'}
+                  {showImportEdit ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </span>
               </button>
               {showImportEdit && (
                 <div className="overflow-x-auto px-2 pb-2">
@@ -2875,6 +2872,13 @@ function App() {
         {/* マスタ候補（datalist） */}
         <datalist id="master-list">
           {master.map(m => <option key={m.name} value={m.name} />)}
+        </datalist>
+        {/* 品目候補（選択も自由入力もできるコンボ用） */}
+        <datalist id="rental-item-list">
+          {RENTAL_ITEMS.map(it => <option key={it} value={it} />)}
+        </datalist>
+        <datalist id="specific-item-list">
+          {SPECIFIC_ITEMS.map(it => <option key={it} value={it} />)}
         </datalist>
 
         {/* 下部固定アクションバー */}
