@@ -1339,7 +1339,7 @@ function buildPrintHTML(report, photoMap) {
       /* pbadgeと同じ理由で、同色の上下ボーダーで縦中央を作る（PDF/印刷で共通） */
       display: inline-block; vertical-align: middle; line-height: 1;
       background: #1e3a8a; color: #fff; padding: 0.4mm 3mm 0; border-radius: 1mm; font-size: 9pt; letter-spacing: 0.15em;
-      border-top: 1.0mm solid #1e3a8a; border-bottom: 2.2mm solid #1e3a8a;
+      border-top: 0.2mm solid #1e3a8a; border-bottom: 3.8mm solid #1e3a8a;
     }
     #print-content-holder .punits { margin-left: auto; font-size: 10.5pt; }
     #print-content-holder .premarks { border: 1px solid #93c5fd; border-radius: 1.5mm; margin-bottom: 3.5mm; }
@@ -1371,9 +1371,9 @@ function buildPrintHTML(report, photoMap) {
          同色(navy)の上下ボーダーで文字の上下に“見えない余白”を作って中央寄せする。
          印刷(ブラウザ描画)でも同じ見た目になる。 */
       display: inline-block; text-align: center; box-sizing: border-box;
-      min-width: 5.5mm; padding: 0.3mm 1.2mm 0; line-height: 1; background: #1e3a8a; color: #fff;
+      min-width: 7mm; padding: 0.3mm 1.2mm 0; line-height: 1; background: #1e3a8a; color: #fff;
       font-size: 9pt; font-weight: bold; border-radius: 1mm; flex-shrink: 0; vertical-align: middle;
-      border-top: 1.2mm solid #1e3a8a; border-bottom: 2.2mm solid #1e3a8a;
+      border-top: 0.4mm solid #1e3a8a; border-bottom: 4mm solid #1e3a8a;
     }
     #print-content-holder .pplace { font-size: 10pt; font-weight: bold; color: #111827; }
     #print-content-holder .pcap-row2 { font-size: 9.5pt; color: #111827; font-weight: bold; }
