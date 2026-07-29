@@ -98,6 +98,14 @@ const OFFICE_MASTER = [
   { name: '大分営業所',   postal: '870-0142', address: '大分県大分市三川下2-7-8',              phone: '097-555-9684', fax: '097-555-9685', manager: '山下 厚' },
 ];
 
+// ポータル(taiyo-portal)でログイン済みなら、その営業所を初期値として使う（同一オリジンのlocalStorageを参照するだけ）
+const portalSessionOffice = () => {
+  try {
+    const s = JSON.parse(localStorage.getItem('taiyo_portal_session') || 'null');
+    return s && OFFICE_MASTER.some(o => o.name === s.office) ? s.office : '';
+  } catch { return ''; }
+};
+
 const COMPANY_NAME = '太陽シルバーサービス株式会社';
 
 // ===== 福祉用具ドメインマスタ =====
@@ -570,38 +578,143 @@ function csvToRows(text) {
   return rows;
 }
 
-// 表形式の行データ（Excel/CSV）→ 商品候補。PDFと同じ判定ロジックを流用する。
+const stripSama = (s) => String(s == null ? '' : s).replace(/[\s　]*[様殿]\s*$/, '').trim();
+
+// 表形式の行データ（Excel/CSV）→ { cands, months, header }
+// 実物のレンタル単位数報告書（SMART様式）は「1明細＝2行」で、
+//   [種目行]  … サービス名 / TAISコード / 区分 / 数量 / 料金区分 / 各月の単位数 …
+//   [商品行]  商品名（種目行の1つ下）
+// と分かれているため、ヘッダーを起点に列位置で読み取る。該当しなければ従来様式にフォールバック。
 function parseRowsAsUnitReport(rows) {
+  const at = (r, c) => (rows[r] && rows[r][c] != null) ? String(rows[r][c]).trim() : '';
+  const rowText = (r) => (rows[r] || []).join('');
+  const nCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+
+  // ① ヘッダー行（サービス名＋TAISコード）を探す
+  let hr = -1;
+  for (let r = 0; r < rows.length; r++) {
+    const t = rowText(r);
+    if (t.includes('サービス名') && /TAIS/i.test(t)) { hr = r; break; }
+  }
+  if (hr < 0) return { cands: parseRowsGeneric(rows), months: [], header: null };
+
+  // ② 主要列を見出しから特定（無ければSMART様式の既定列 B/E/J/O/Q/R/U を使う）
+  const findCol = (r, re) => { for (let c = 0; c < nCols; c++) if (re.test(at(r, c))) return c; return -1; };
+  const D = { name: 1, service: 4, tais: 9, kubun: 14, qty: 16, rate: 17, price: 20 };
+  const cService = findCol(hr, /サービス名|品名/) >= 0 ? findCol(hr, /サービス名|品名/) : D.service;
+  const cTais = findCol(hr, /TAIS/i) >= 0 ? findCol(hr, /TAIS/i) : D.tais;
+
+  // ③ 月見出し（7月・8月…）と、その下の「単位数」列を探す（ヘッダー前後を走査）
+  let monthCols = [];
+  for (const rr of [hr, hr - 1, hr + 1]) {
+    if (rr < 0) continue;
+    const found = [];
+    for (let c = 0; c < nCols; c++) if (/^\s*\d{1,2}\s*月/.test(at(rr, c))) found.push({ c, label: at(rr, c).replace(/\s/g, '') });
+    if (found.length) { monthCols = found.sort((a, b) => a.c - b.c); break; }
+  }
+  let taniCols = [];
+  for (const rr of [hr + 1, hr, hr + 2]) {
+    if (rr < 0) continue;
+    const found = [];
+    for (let c = 0; c < nCols; c++) if (at(rr, c) === '単位数') found.push(c);
+    if (found.length) { taniCols = found.sort((a, b) => a - b); break; }
+  }
+  const months = monthCols.length ? monthCols.map(m => m.label) : taniCols.map((_, i) => ['当月', '翌月'][i] || '');
+
+  // ④ 明細（2行で1件）
+  const cands = [];
+  const seen = new Set();
+  for (let r = hr + 2; r < rows.length; r += 2) {
+    if (rowText(r).includes('合計')) break;
+    const service = at(r, cService);
+    const rawTais = at(r, cTais);
+    // 明細の先頭行でなければ飛ばす（TAISも種目も無い行）
+    if (!TAIS_RE.test(rawTais) && !/(貸与|販売|購入)/.test(service)) continue;
+    // 「保険外」品目は対象外（種目行・商品行のどちらに出てもスキップ）
+    if (/保険外/.test(rowText(r)) || /保険外/.test(rowText(r + 1))) continue;
+
+    // 商品名は1つ下の行。既定列(B)が空なら、その行で最も長い日本語セルを採用
+    let productName = cleanName(at(r + 1, D.name));
+    if (!productName) {
+      const cell = (rows[r + 1] || [])
+        .filter(c => c && !TAIS_RE.test(c) && !NUM_LIKE_RE.test(c) && HAS_JA_RE.test(c))
+        .sort((a, b) => b.length - a.length)[0] || '';
+      productName = cleanName(cell);
+    }
+    if (!productName) continue;
+
+    const tm = rawTais.match(TAIS_RE);
+    const tais = tm ? `${tm[1]}-${tm[2]}` : normalizeTais(rawTais);
+    const norm = service ? normalizeItemLabel(service) : null;
+    const km = (at(r, D.kubun) || rowText(r)).match(KUBUN_RE);
+    const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
+    const rate = (at(r, D.rate).match(/(半月|月額|日割)/) || [''])[0];
+    const m1 = taniCols.length ? toInt(at(r, taniCols[0])) : 0;
+    const m2 = taniCols.length > 1 ? toInt(at(r, taniCols[1])) : 0;
+    const isSale = norm && norm.category === CATEGORY_SPECIFIC;
+    const units = isSale ? toInt(at(r, D.price)) : (m2 || m1);
+
+    const key = `${productName}|${tais}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cands.push({
+      productName: productName.slice(0, 60), maker: '', tais, units,
+      m1Units: m1, m2Units: m2, rate,
+      item: norm ? norm.item : '', category: norm ? norm.category : CATEGORY_RENTAL, kubun,
+    });
+  }
+
+  // ⑤ ヘッダー情報（利用者名・居宅・ケアマネ・担当者）
+  const header = {};
+  for (let r = 0; r < rows.length && r <= hr; r++) {
+    for (let c = 0; c < nCols; c++) {
+      const v = at(r, c);
+      if (!header.clientName && /^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)/.test(v)) {
+        // 同じセルに値が続く／右隣のセル、のどちらでも拾う
+        const inline = v.replace(/^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)\s*[:：]?\s*/, '');
+        header.clientName = stripSama(inline || at(r, c + 1) || at(r + 1, c));
+      }
+      if (!header.staff && /^担当(者)?\s*[:：]/.test(v)) {
+        const inline = v.replace(/^担当(者)?\s*[:：]\s*/, '');
+        header.staff = (inline || at(r, c + 1)).trim();
+      }
+    }
+  }
+  // SMART様式は B2＝居宅名 / B3＝ケアマネ名（宛名ブロック）
+  const b2 = at(1, 1), b3 = at(2, 1);
+  if (b2 && !NUM_LIKE_RE.test(b2)) header.cmOffice = b2.slice(0, 30);
+  if (b3) { const v = stripSama(b3); if (v && v.length <= 12) header.careManager = v; }
+  Object.keys(header).forEach(k => { if (!header[k]) delete header[k]; });
+
+  return { cands, months, header };
+}
+
+// 従来様式（1行＝1明細）用のフォールバック。TAISと最長日本語セルから推定する。
+function parseRowsGeneric(rows) {
   const cands = [];
   const seen = new Set();
   for (const cells of rows) {
     const line = cells.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     if (!line) continue;
-    if (/保険外/.test(line)) continue;   // 保険外品目は対象外
+    if (/保険外/.test(line)) continue;
     const tm = line.match(TAIS_RE);
     if (!tm) continue;
     const tais = `${tm[1]}-${tm[2]}`;
-
-    // 種目名（○○貸与/販売）を含むセルから品目・区分を決める
     let norm = null;
     for (const c of cells) {
       if (c && /(貸与|販売|購入)$/.test(c.replace(/[\s　]/g, ''))) { norm = normalizeItemLabel(c); break; }
     }
-    // 商品名: TAIS・数値・区分・種目名以外で最も長い日本語セル
     const nameCell = cells
       .filter(c => c && !TAIS_RE.test(c) && !NUM_LIKE_RE.test(c) && !KUBUN_RE.test(c)
         && !/(貸与|販売|購入)$/.test(c.replace(/[\s　]/g, '')) && HAS_JA_RE.test(c))
       .sort((a, b) => b.length - a.length)[0] || '';
     const productName = cleanName(nameCell);
     if (!productName) continue;
-
-    // 単位数: 「単位」列の値、なければ行の最後の数値（月額）
     const nums = cells.filter(c => NUM_LIKE_RE.test(c)).map(toInt).filter(n => n > 0);
     const um = line.match(UNITS_RE);
     const units = um ? toInt(um[1]) : (nums.length ? nums[nums.length - 1] : 0);
     const km = line.match(KUBUN_RE);
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
-
     const key = `${productName}|${tais}|${units}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1621,6 +1734,7 @@ function App() {
   const [settings, setSettings] = useState(() => {
     const s = { office: '', staff: '', apiKey: '', aiModel: 'claude-opus-4-8', ...loadStorage(STORAGE_KEYS.SETTINGS, {}) };
     if (!AI_ENABLED) s.apiKey = ''; // AI機能OFF時は保管済みキーを残さない
+    if (!s.office) s.office = portalSessionOffice(); // ポータル経由なら営業所選択を引き継ぐ
     return s;
   });
   // 起動時に商品マスタのゴミ（過去のPDF解析の残骸等）を静かに整理して読み込む
@@ -2064,12 +2178,14 @@ function App() {
     try {
       if (isExcel || isCsv) {
         const rows = isExcel ? xlsxToRows(await file.arrayBuffer()) : csvToRows(await file.text());
-        const cands = parseRowsAsUnitReport(rows);
-        if (!cands.length) {
+        const parsed = parseRowsAsUnitReport(rows);
+        if (!parsed.cands.length) {
           showToast('この表から商品情報（TAISコード）を読み取れませんでした。列の並びをご確認ください', 'error');
           return;
         }
-        applyExtraction(cands, parseHeaderFromRows(rows), '単位数報告書', file.name);
+        // ヘッダーは表専用の抽出を優先し、足りない項目は汎用抽出で補完
+        const header = { ...parseHeaderFromRows(rows), ...(parsed.header || {}) };
+        applyExtraction(parsed.cands, header, '単位数報告書', file.name, parsed.months);
         return;
       }
       const buf = await file.arrayBuffer();
