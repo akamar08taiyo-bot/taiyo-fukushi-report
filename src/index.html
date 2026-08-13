@@ -1449,11 +1449,14 @@ function buildPrintHTML(report, photoMap) {
       padding: 2mm 3.5mm; margin: 3.5mm 0 3mm; font-size: 9.5pt; font-weight: bold; color: #1e3a8a;
     }
     #print-content-holder .ptype {
-      /* pbadgeと同じ理由で、同色の上下ボーダーで縦中央を作る（PDF/印刷で共通） */
+      /* pbadgeと同じ理由で、同色の上下ボーダーで縦中央を作る。
+         この値(border-bottom:1mm)は画面表示・実際の印刷(window.print)で中央に見えるよう実測調整済み。
+         html2canvas(PDF保存)だけ文字を下辺にpinする癖があるため、そちらは.pdf-captureで別値に差し替える。 */
       display: inline-block; vertical-align: middle; line-height: 1;
       background: #1e3a8a; color: #fff; padding: 0.4mm 3mm 0; border-radius: 1mm; font-size: 9pt; letter-spacing: 0.15em;
-      border-top: 0.2mm solid #1e3a8a; border-bottom: 3.8mm solid #1e3a8a;
+      border-top: 0.2mm solid #1e3a8a; border-bottom: 1mm solid #1e3a8a;
     }
+    #print-content-holder.pdf-capture .ptype { border-bottom: 3.8mm solid #1e3a8a; }
     #print-content-holder .punits { margin-left: auto; font-size: 10.5pt; }
     #print-content-holder .premarks { border: 1px solid #93c5fd; border-radius: 1.5mm; margin-bottom: 3.5mm; }
     #print-content-holder .premarks-title {
@@ -1480,14 +1483,16 @@ function buildPrintHTML(report, photoMap) {
     #print-content-holder .pcap { border-top: 1px solid #bfdbfe; padding: 1.5mm 2.5mm; background: #fff; }
     #print-content-holder .pcap-row1 { display: flex; align-items: center; gap: 2mm; margin-bottom: 0.5mm; }
     #print-content-holder .pbadge {
-      /* PDF化(html2canvas)は文字を箱の下辺にpinしpadding-bottomを無視するため、
-         同色(navy)の上下ボーダーで文字の上下に“見えない余白”を作って中央寄せする。
-         印刷(ブラウザ描画)でも同じ見た目になる。 */
+      /* 同色(navy)の上下ボーダーで文字の上下に“見えない余白”を作って中央寄せする。
+         この値(border-bottom:1mm)は画面表示・実際の印刷(window.print)で中央に見えるよう実測調整済み。
+         html2canvas(PDF保存)は文字を箱の下辺にpinしpadding-bottomを無視する癖があるため、
+         そちらは.pdf-captureで元の値(4mm)に差し替える（savePdf内でholderに一時的に付与）。 */
       display: inline-block; text-align: center; box-sizing: border-box;
       min-width: 7mm; padding: 0.3mm 1.2mm 0; line-height: 1; background: #1e3a8a; color: #fff;
       font-size: 9pt; font-weight: bold; border-radius: 1mm; flex-shrink: 0; vertical-align: middle;
-      border-top: 0.4mm solid #1e3a8a; border-bottom: 4mm solid #1e3a8a;
+      border-top: 0.4mm solid #1e3a8a; border-bottom: 1mm solid #1e3a8a;
     }
+    #print-content-holder.pdf-capture .pbadge { border-bottom: 4mm solid #1e3a8a; }
     #print-content-holder .pplace { font-size: 10pt; font-weight: bold; color: #111827; }
     #print-content-holder .pcap-row2 { font-size: 9.5pt; color: #111827; font-weight: bold; }
     #print-content-holder .pcap-row3 { font-size: 9.5pt; color: #1f2937; overflow-wrap: anywhere; }
@@ -1540,7 +1545,9 @@ function buildPrintHTML(report, photoMap) {
       position: absolute; bottom: 6mm; right: 13mm; font-size: 8pt; color: #6b7280;
     }
     @media screen {
-      #print-content-holder .doc { box-shadow: 0 2px 12px rgba(0,0,0,0.35); margin: 0 auto 16px; }
+      /* margin-leftは0固定（autoにすると左の操作ボタン用余白(padding-left)の外側でさらに
+         中央寄せされ、ボタンと用紙の間に大きな隙間ができてしまう） */
+      #print-content-holder .doc { box-shadow: 0 2px 12px rgba(0,0,0,0.35); margin: 0 auto 16px 0; }
     }
   </style>
   ${pagesHTML}`;
@@ -2334,6 +2341,8 @@ function App() {
     const docsAll = [...holder.querySelectorAll('.doc')];
     const prevZooms = docsAll.map(d => d.style.zoom);
     docsAll.forEach(d => { d.style.zoom = '1'; }); // 等倍で取り込む（画質低下を防ぐ）
+    // html2canvasは文字を箱の下辺にpinする癖があるため、PDF化中だけバッジの見た目値を切り替える
+    holder.classList.add('pdf-capture');
     try {
       const docs = holder.querySelectorAll('.doc');
       if (!docs.length) return;
@@ -2353,7 +2362,11 @@ function App() {
       showToast('PDFを保存しました（端末のダウンロードに保存されます）');
     } catch (err) {
       showToast(`PDF生成に失敗：${err.message}`, 'error');
-    } finally { docsAll.forEach((d, i) => { d.style.zoom = prevZooms[i]; }); setBusy(null); }
+    } finally {
+      holder.classList.remove('pdf-capture');
+      docsAll.forEach((d, i) => { d.style.zoom = prevZooms[i]; });
+      setBusy(null);
+    }
   };
 
   // ---- データ移行（JSONエクスポート/インポート） ----
