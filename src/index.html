@@ -621,10 +621,13 @@ function parseRowsAsUnitReport(rows) {
   }
   const months = monthCols.length ? monthCols.map(m => m.label) : taniCols.map((_, i) => ['当月', '翌月'][i] || '');
 
-  // ④ 明細（2行で1件）
+  // ④ 明細（種目行の直下が商品名）。様式によっては種目行/商品名行の後ろに
+  //    レンタル期間行が付き3行1組になることがあるため、固定2行ストライドにせず
+  //    1行ずつ走査してTAIS＋種目キーワードを持つ行だけを明細開始行とみなす
+  //    （末尾の余分な行は次の判定でスキップされるだけで、次の明細検出はズレない）
   const cands = [];
   const seen = new Set();
-  for (let r = hr + 2; r < rows.length; r += 2) {
+  for (let r = hr + 2; r < rows.length; r++) {
     if (rowText(r).includes('合計')) break;
     const service = at(r, cService);
     const rawTais = at(r, cTais);
@@ -670,9 +673,12 @@ function parseRowsAsUnitReport(rows) {
     for (let c = 0; c < nCols; c++) {
       const v = at(r, c);
       if (!header.clientName && /^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)/.test(v)) {
-        // 同じセルに値が続く／右隣のセル、のどちらでも拾う
+        // 同じセルに値が続く／右隣のセル、のどちらでも拾う。
+        // ただし右隣が「住所」等の見出しセルの場合は値ではないので、直下のセルにフォールバックする
+        // （「お客様名｜住所｜電話番号」のように見出しが横並びの様式で名前欄が空になるのを防ぐ）
         const inline = v.replace(/^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)\s*[:：]?\s*/, '');
-        header.clientName = stripSama(inline || at(r, c + 1) || at(r + 1, c));
+        const right = at(r, c + 1);
+        header.clientName = stripSama(inline || (right && !isHeaderCell(right) ? right : '') || at(r + 1, c));
       }
       if (!header.staff && /^担当(者)?\s*[:：]/.test(v)) {
         const inline = v.replace(/^担当(者)?\s*[:：]\s*/, '');
