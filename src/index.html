@@ -2717,8 +2717,11 @@ function App() {
 
   // ---- 編集 ----
   const renderEdit = () => {
-    // 画面のどこにドロップしても写真を追加できる（カード上にドロップした場合はそのカードへ）
+    // 画面のどこにドロップしても写真を追加できる（カード上にドロップした場合はそのカードへ）。
+    // 単位数報告書(PDF/Excel/CSV)がドロップされた場合はSTEP1の取込として扱う
+    // （写真用のフィルタ(image/*)に弾かれて何も起きない、という無反応を防ぐ）
     const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    const isImportableDoc = (f) => /\.(pdf|xlsx|xlsm|csv|tsv|txt)$/i.test(f.name || '');
     const pageDrop = {
       onDragEnter: (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth.current++; setDropOver(true); },
       onDragOver: (e) => { if (!hasFiles(e)) return; e.preventDefault(); },
@@ -2726,15 +2729,21 @@ function App() {
       onDrop: (e) => {
         if (!hasFiles(e)) return;
         e.preventDefault(); dragDepth.current = 0; setDropOver(false);
-        if (e.dataTransfer.files && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files, null);
+        const files = Array.from(e.dataTransfer.files || []);
+        if (!files.length) return;
+        const doc = files.find(isImportableDoc);
+        const images = files.filter(f => f.type.startsWith('image/'));
+        if (doc) handleImportFile(doc);
+        if (images.length) handleFiles(images, null);
       },
     };
     return (
       <div className="max-w-4xl mx-auto p-3 md:p-4 pb-36 relative" {...pageDrop}>
         {dropOver && (
           <div className="fixed inset-0 z-50 bg-emerald-600/15 border-4 border-dashed border-emerald-500 flex items-center justify-center pointer-events-none">
-            <div className="bg-white rounded-xl shadow-xl px-6 py-4 text-emerald-700 font-bold flex items-center gap-2">
-              <ImagePlus size={22} /> ここに写真をドロップして追加
+            <div className="bg-white rounded-xl shadow-xl px-6 py-4 text-emerald-700 font-bold flex flex-col items-center gap-1 text-center">
+              <span className="flex items-center gap-2"><ImagePlus size={22} /> ここにドロップして追加</span>
+              <span className="text-xs font-normal text-slate-500">写真、または単位数報告書(PDF/Excel/CSV)</span>
             </div>
           </div>
         )}
@@ -2758,6 +2767,9 @@ function App() {
               </span>
               <span className="block text-[11px] md:text-xs text-indigo-100 mt-1">
                 PDF・Excel・CSV に対応／商品名・TAIS・単位数に加え、利用者名・居宅・ケアマネも自動入力します
+              </span>
+              <span className="block text-[11px] md:text-xs text-indigo-100 mt-0.5">
+                クリックしてファイルを選ぶか、画面にドラッグ＆ドロップしても取り込めます
               </span>
             </span>
             <Upload size={20} className="shrink-0 opacity-80" />
