@@ -507,6 +507,12 @@ function normalizeItemLabel(label) {
   if (!s) return null;
   const isSale = /(販売|購入|特定)/.test(s);
   s = s.replace(/^(介護予防|予防)/, '').replace(/(貸与|販売|購入)$/, '');
+  const aliases = {
+    '徘徊感知器': '認知症老人徘徊感知機器',
+    '認知症徘徊感知器': '認知症老人徘徊感知機器',
+    '認知症老人徘徊感知器': '認知症老人徘徊感知機器',
+  };
+  s = aliases[s] || s;
   const pool = isSale ? SPECIFIC_ITEMS : RENTAL_ITEMS;
   const hit = pool.find(it => it === s) || pool.find(it => it.startsWith(s) || s.startsWith(it));
   return {
@@ -539,29 +545,52 @@ function xlsxToRows(arrayBuffer) {
       shared.push(ts.map(t => t.textContent).join(''));
     }
   }
-  // 最初のワークシート
-  const sheetName = Object.keys(files).find(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
-  if (!sheetName) return [];
-  const doc = parse(strFromU8(files[sheetName]));
-  const rows = [];
-  for (const row of doc.getElementsByTagName('row')) {
-    const cells = [];
-    for (const c of row.getElementsByTagName('c')) {
-      const idx = colToIndex(c.getAttribute('r'));
-      const type = c.getAttribute('t');
-      let val = '';
-      if (type === 'inlineStr') {
-        val = [...c.getElementsByTagName('t')].map(t => t.textContent).join('');
-      } else {
-        const v = c.getElementsByTagName('v')[0];
-        const raw = v ? v.textContent : '';
-        val = type === 's' ? (shared[Number(raw)] ?? '') : raw;
+  const sheetNames = Object.keys(files)
+    .filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))
+    .sort((a, b) => Number(a.match(/sheet(\d+)/)[1]) - Number(b.match(/sheet(\d+)/)[1]));
+  if (!sheetNames.length) return [];
+
+  const parseSheet = (sheetName) => {
+    const doc = parse(strFromU8(files[sheetName]));
+    const rows = [];
+    const formulas = [];
+    for (const row of doc.getElementsByTagName('row')) {
+      // 空行がXMLから省略されるブックでもExcel上の行番号を保つ。
+      const rowIndex = Math.max(0, Number(row.getAttribute('r') || rows.length + 1) - 1);
+      const cells = [];
+      const rowFormulas = [];
+      for (const c of row.getElementsByTagName('c')) {
+        const idx = colToIndex(c.getAttribute('r'));
+        const type = c.getAttribute('t');
+        let val = '';
+        if (type === 'inlineStr') {
+          val = [...c.getElementsByTagName('t')].map(t => t.textContent).join('');
+        } else {
+          const v = c.getElementsByTagName('v')[0];
+          const raw = v ? v.textContent : '';
+          val = type === 's' ? (shared[Number(raw)] ?? '') : raw;
+        }
+        cells[idx] = String(val ?? '').trim();
+        const f = c.getElementsByTagName('f')[0];
+        if (f && f.textContent) rowFormulas[idx] = f.textContent;
       }
-      cells[idx] = String(val ?? '').trim();
+      while (rows.length <= rowIndex) rows.push([]);
+      while (formulas.length <= rowIndex) formulas.push([]);
+      rows[rowIndex] = Array.from(cells, x => x || '');
+      formulas[rowIndex] = Array.from(rowFormulas, x => x || '');
     }
-    rows.push(Array.from(cells, x => x || ''));
-  }
-  return rows;
+    // 数式セルの参照元を後段でたどるため、配列の非列挙プロパティとして保持する。
+    Object.defineProperty(rows, '_formulas', { value: formulas, enumerable: false });
+    return rows;
+  };
+
+  const sheets = sheetNames.map(parseSheet);
+  // 複数シート時は「サービス名」「TAISコード」を持つ帳票シートを優先する。
+  // 見つからない場合だけ従来どおり先頭シートを使う。
+  return sheets.find(rs => rs.some(row => {
+    const text = row.join('');
+    return text.includes('サービス名') && /TAIS/i.test(text);
+  })) || sheets[0];
 }
 
 // CSV（カンマ／タブ、ダブルクォート対応）
@@ -585,6 +614,53 @@ function csvToRows(text) {
 
 const stripSama = (s) => String(s == null ? '' : s).replace(/[\s　]*[様殿]\s*$/, '').trim();
 
+const isTemplateCell = (value) => {
+  const s = String(value == null ? '' : value).trim();
+  return !s || /^#(?:VALUE|REF|NAME|N\/A|DIV\/0)!?$/i.test(s) || /%[^%]*%|％[^％]*％/.test(s);
+};
+
+const a1Cell = (rows, ref) => {
+  const m = String(ref || '').replace(/\$/g, '').match(/^([A-Z]{1,3})(\d+)$/i);
+  if (!m) return '';
+  const r = Number(m[2]) - 1;
+  const c = colToIndex(m[1].toUpperCase());
+  return rows[r] && rows[r][c] != null ? String(rows[r][c]).trim() : '';
+};
+
+const formulaSourceCells = (rows, r, c) => {
+  const formula = rows._formulas && rows._formulas[r] ? rows._formulas[r][c] : '';
+  if (!formula) return [];
+  const refs = [...formula.matchAll(/\$?([A-Z]{1,3})\$?(\d+)/gi)]
+    .map(m => `${m[1].toUpperCase()}${m[2]}`);
+  return [...new Set(refs)].map(ref => ({ ref, value: a1Cell(rows, ref) }));
+};
+
+const formulaSourceValues = (rows, r, c) => formulaSourceCells(rows, r, c)
+  .map(cell => cell.value).filter(v => !isTemplateCell(v));
+
+// 数式セルのキャッシュ値が「％翌月_単位数％」等の未展開文字列でも、
+// 数式が参照する非表示セルから実値を取得する。
+const resolvedNumericCell = (rows, r, c) => {
+  const direct = rows[r] && rows[r][c] != null ? String(rows[r][c]).trim() : '';
+  if (!isTemplateCell(direct) && NUM_LIKE_RE.test(direct)) return toInt(direct);
+  // SMART式の単位数セルは、条件判定用フラグ→実値セルの順で参照する。
+  // 実値が空欄のときに前方のフラグ（1/2）を単位数と誤認しないよう、最後の参照元だけを見る。
+  const sources = formulaSourceCells(rows, r, c);
+  const last = sources.length ? sources[sources.length - 1].value : '';
+  if (NUM_LIKE_RE.test(last)) return toInt(last);
+  return 0;
+};
+
+const resolvedMonthCell = (rows, r, c) => {
+  const direct = rows[r] && rows[r][c] != null ? String(rows[r][c]).replace(/\s/g, '') : '';
+  if (/^\d{1,2}月$/.test(direct)) return direct;
+  const formula = rows._formulas && rows._formulas[r] ? rows._formulas[r][c] : '';
+  const source = formulaSourceValues(rows, r, c).map(toInt).find(n => n >= 1 && n <= 12);
+  if (!source) return '';
+  const month = /\+\s*1/.test(formula) ? (source % 12) + 1 : source;
+  return `${month}月`;
+};
+
 // 表形式の行データ（Excel/CSV）→ { cands, months, header }
 // 実物のレンタル単位数報告書（SMART様式）は「1明細＝2行」で、
 //   [種目行]  … サービス名 / TAISコード / 区分 / 数量 / 料金区分 / 各月の単位数 …
@@ -603,11 +679,26 @@ function parseRowsAsUnitReport(rows) {
   }
   if (hr < 0) return { cands: parseRowsGeneric(rows), months: [], header: null };
 
-  // ② 主要列を見出しから特定（無ければSMART様式の既定列 B/E/J/O/Q/R/U を使う）
+  // ② 主要列を見出しから特定。SMART帳票は出力バージョンによって列位置が変わり、
+  //    表示セルが結合されるため、固定列は最後のフォールバックにだけ使う。
   const findCol = (r, re) => { for (let c = 0; c < nCols; c++) if (re.test(at(r, c))) return c; return -1; };
-  const D = { name: 1, service: 4, tais: 9, kubun: 14, qty: 16, rate: 17, price: 20 };
+  const findColAround = (rowIndexes, re) => {
+    for (const r of rowIndexes) {
+      if (r < 0 || r >= rows.length) continue;
+      const c = findCol(r, re);
+      if (c >= 0) return c;
+    }
+    return -1;
+  };
+  const D = { name: 0, service: 0, tais: 13, kubun: 19, qty: 21, rate: 26, price: 23 };
   const cService = findCol(hr, /サービス名|品名/) >= 0 ? findCol(hr, /サービス名|品名/) : D.service;
   const cTais = findCol(hr, /TAIS/i) >= 0 ? findCol(hr, /TAIS/i) : D.tais;
+  const cKubun = findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) >= 0
+    ? findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) : D.kubun;
+  const cRate = findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) >= 0
+    ? findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) : D.rate;
+  const cPrice = findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) >= 0
+    ? findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) : D.price;
 
   // ③ 月見出し（7月・8月…）と、その下の「単位数」列を探す（ヘッダー前後を走査）
   let monthCols = [];
@@ -624,7 +715,11 @@ function parseRowsAsUnitReport(rows) {
     for (let c = 0; c < nCols; c++) if (at(rr, c) === '単位数') found.push(c);
     if (found.length) { taniCols = found.sort((a, b) => a - b); break; }
   }
-  const months = monthCols.length ? monthCols.map(m => m.label) : taniCols.map((_, i) => ['当月', '翌月'][i] || '');
+  let months = monthCols.length ? monthCols.map(m => m.label) : [];
+  if (!months.length && taniCols.length) {
+    months = Array.from({ length: nCols }, (_, c) => resolvedMonthCell(rows, hr, c)).filter(Boolean);
+  }
+  if (!months.some(Boolean)) months = taniCols.map((_, i) => ['当月', '翌月'][i] || '');
 
   // ④ 明細（種目行の直下が商品名）。様式によっては種目行/商品名行の後ろに
   //    レンタル期間行が付き3行1組になることがあるため、固定2行ストライドにせず
@@ -655,13 +750,14 @@ function parseRowsAsUnitReport(rows) {
     const tm = rawTais.match(TAIS_RE);
     const tais = tm ? `${tm[1]}-${tm[2]}` : normalizeTais(rawTais);
     const norm = service ? normalizeItemLabel(service) : null;
-    const km = (at(r, D.kubun) || rowText(r)).match(KUBUN_RE);
+    const statusCell = at(r, cKubun);
+    const km = ((!isTemplateCell(statusCell) ? statusCell : '') || rowText(r)).match(KUBUN_RE);
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
-    const rate = (at(r, D.rate).match(/(半月|月額|日割)/) || [''])[0];
-    const m1 = taniCols.length ? toInt(at(r, taniCols[0])) : 0;
-    const m2 = taniCols.length > 1 ? toInt(at(r, taniCols[1])) : 0;
+    const rate = (at(r, cRate).match(/(半月|月額|日割)/) || [''])[0];
+    const m1 = taniCols.length ? resolvedNumericCell(rows, r, taniCols[0]) : 0;
+    const m2 = taniCols.length > 1 ? resolvedNumericCell(rows, r, taniCols[1]) : 0;
     const isSale = norm && norm.category === CATEGORY_SPECIFIC;
-    const units = isSale ? toInt(at(r, D.price)) : (m2 || m1);
+    const units = isSale ? toInt(at(r, cPrice)) : (m2 || m1);
 
     const key = `${productName}|${tais}`;
     if (seen.has(key)) continue;
@@ -675,27 +771,67 @@ function parseRowsAsUnitReport(rows) {
 
   // ⑤ ヘッダー情報（利用者名・居宅・ケアマネ・担当者）
   const header = {};
+  const ORG_WORD_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
+  const cleanHeaderValue = (value) => stripSama(String(value == null ? '' : value)
+    .replace(/^[:：\s　]+/, '').replace(/御中\s*$/, '').trim());
+  const usableHeaderValue = (value) => {
+    const v = cleanHeaderValue(value);
+    return !!v && !isTemplateCell(v) && !isHeaderCell(v)
+      && !/^(居宅・地域包括|ご本人|しない|する)$/.test(v)
+      && !/^\d[\d\s\-./年月日]*$/.test(v);
+  };
+  const personScore = (value) => {
+    const raw = String(value == null ? '' : value).trim();
+    const v = cleanHeaderValue(raw).replace(/[\s　]/g, '');
+    if (!usableHeaderValue(raw) || v.length < 2 || v.length > 12 || ORG_WORD_RE.test(raw)
+        || /(福岡|都|道|府|県|市|区|町|村|丁目|番地|大字|住所|電話|本人)/.test(raw)
+        || /[0-9A-Za-z]/.test(v)) return -100;
+    let score = 10;
+    if (/[ぁ-んァ-ヶ一-龠]/.test(v)) score += 5;
+    if (/[\s　]/.test(raw)) score += 2;
+    if (/[様殿]\s*$/.test(raw)) score += 2;
+    if (/[○●〇]/.test(raw)) score -= 20;
+    return score;
+  };
+  const bestPerson = (values) => values
+    .map((value, index) => ({ value: cleanHeaderValue(value), score: personScore(value), index }))
+    .filter(x => x.score >= 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.value || '';
+
   for (let r = 0; r < rows.length && r <= hr; r++) {
     for (let c = 0; c < nCols; c++) {
       const v = at(r, c);
       if (!header.clientName && /^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)/.test(v)) {
-        // 同じセルに値が続く／右隣のセル、のどちらでも拾う。
-        // ただし右隣が「住所」等の見出しセルの場合は値ではないので、直下のセルにフォールバックする
-        // （「お客様名｜住所｜電話番号」のように見出しが横並びの様式で名前欄が空になるのを防ぐ）
         const inline = v.replace(/^(ご利用者名|お客様名|お客さま名|利用者名|顧客名)\s*[:：]?\s*/, '');
-        const right = at(r, c + 1);
-        header.clientName = stripSama(inline || (right && !isHeaderCell(right) ? right : '') || at(r + 1, c));
+        const candidates = [inline, at(r, c + 1), at(r + 1, c)];
+        // 表示セルが数式の場合は参照元（非表示列）も候補にする。
+        candidates.push(...formulaSourceValues(rows, r + 1, c));
+        // SMART個人情報保護様式は、同じ行の右端にマスク前の利用者名を保持する。
+        candidates.push(...(rows[r] || []).slice(c + 1), ...(rows[r + 1] || []).slice(c + 1));
+        header.clientName = bestPerson(candidates);
       }
-      if (!header.staff && /^担当(者)?\s*[:：]/.test(v)) {
+      if (!header.staff && /^担当(者)?\s*[:：]?\s*$/.test(v)) {
         const inline = v.replace(/^担当(者)?\s*[:：]\s*/, '');
-        header.staff = (inline || at(r, c + 1)).trim();
+        const nearby = (rows[r] || []).slice(c + 1, Math.min(nCols, c + 12));
+        header.staff = bestPerson([inline, ...nearby]);
       }
     }
   }
-  // SMART様式は B2＝居宅名 / B3＝ケアマネ名（宛名ブロック）
+
+  const topValues = rows.slice(0, hr + 1).flat().filter(v => usableHeaderValue(v));
+  if (!header.cmOffice) {
+    const office = topValues.find(v => ORG_WORD_RE.test(v) && !/太陽|ｼﾙﾊﾞｰ|シルバー/.test(v));
+    if (office) header.cmOffice = cleanHeaderValue(office).slice(0, 30);
+  }
+  if (!header.careManager) {
+    // 宛先の「○○ 様」を優先。利用者名セルは敬称が別セルなので混同しない。
+    const addressed = topValues.filter(v => /[様殿]\s*$/.test(v));
+    header.careManager = bestPerson(addressed.filter(v => cleanHeaderValue(v) !== header.clientName));
+  }
+  // 旧SMART様式（B2＝居宅名 / B3＝ケアマネ名）も維持する。
   const b2 = at(1, 1), b3 = at(2, 1);
-  if (b2 && !NUM_LIKE_RE.test(b2)) header.cmOffice = b2.slice(0, 30);
-  if (b3) { const v = stripSama(b3); if (v && v.length <= 12) header.careManager = v; }
+  if (!header.cmOffice && usableHeaderValue(b2)) header.cmOffice = cleanHeaderValue(b2).slice(0, 30);
+  if (!header.careManager && personScore(b3) >= 0) header.careManager = cleanHeaderValue(b3).slice(0, 12);
   Object.keys(header).forEach(k => { if (!header[k]) delete header[k]; });
 
   return { cands, months, header };
@@ -3331,7 +3467,10 @@ function App() {
 
 // デバッグ用フック（localStorageでフラグを立てた端末のみ公開）
 if (localStorage.getItem('taiyo_fukushi_debug') === '1') {
-  window.__debugPdf = { pdfToLines, parseCandidatesFromLines, parseRentalUnitReport, parseReportHeader, normalizeItemLabel };
+  window.__debugPdf = {
+    pdfToLines, parseCandidatesFromLines, parseRentalUnitReport, parseReportHeader, normalizeItemLabel,
+    xlsxToRows, parseRowsAsUnitReport, parseHeaderFromRows,
+  };
   window.__html2canvas = html2canvas;
 }
 
