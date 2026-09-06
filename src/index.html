@@ -1404,11 +1404,15 @@ function buildPrintHTML(report, photoMap) {
     const photo = (typeof rawPhoto === 'string' && /^data:image\//.test(rawPhoto)) ? rawPhoto : null;
     const catShort = s.category === CATEGORY_RENTAL ? '貸与'
       : s.category === CATEGORY_PREVENTION ? '予防貸与'
-      : s.category === CATEGORY_SPECIFIC ? '特定' : '';
+      : s.category === CATEGORY_SPECIFIC ? '特定福祉用具' : '';
     const isSale = s.category === CATEGORY_SPECIFIC; // 販売品の数値は単位数ではなく価格(円)
     const num = toInt(s.units);
-    const unitsDisp = num ? (isSale ? `¥${num.toLocaleString()}` : `${num.toLocaleString()} 単位`) : '―';
+    const unitsDisp = isSale ? `¥${num.toLocaleString()}` : `${num.toLocaleString()} 単位`;
     const qty = Math.max(1, toInt(s.qty) || 1);
+    // TAIS・価格は未入力の場合、帳票に空欄（―）を印字せず項目ごと非表示にする
+    const taisPart = s.tais ? `<span>TAIS：${e(s.tais)}</span>` : '';
+    const pricePart = num ? `<span>${isSale ? '価格' : '単位数'}：${unitsDisp}</span>` : '';
+    const row4 = (taisPart || pricePart) ? `<div class="pcap-row4">${taisPart}${pricePart}</div>` : '';
     return `
     <div class="pcard">
       <div class="pimg">${photo
@@ -1418,7 +1422,7 @@ function buildPrintHTML(report, photoMap) {
         <div class="pcap-row1"><span class="pbadge">${idx + 1}</span>${s.place ? `<span class="pplace">納品箇所：${e(s.place)}</span>` : ''}</div>
         <div class="pcap-row2">${catShort ? `［${catShort}］` : ''}${e(s.item || '（品目未設定）')}${qty > 1 ? `　×${qty}` : ''}</div>
         <div class="pcap-row3">${e(s.productName || '')}</div>
-        <div class="pcap-row4"><span>TAIS：${e(s.tais || '―')}</span><span>${isSale ? '価格' : '単位数'}：${unitsDisp}</span></div>
+        ${row4}
         ${s.note ? `<div class="pcap-note">${e(s.note)}</div>` : ''}
       </div>
     </div>`;
