@@ -137,7 +137,6 @@ const CATEGORY_PREVENTION = '介護予防福祉用具貸与'; // 旧データ互
 const CATEGORY_SPECIFIC = '特定福祉用具';
 // 画面・帳票で扱う区分は「貸与」「特定福祉用具」の2種類のみ
 const CATEGORIES = [CATEGORY_RENTAL, CATEGORY_SPECIFIC];
-const RENTAL_CATEGORIES = [CATEGORY_RENTAL, CATEGORY_PREVENTION]; // 単位数で集計する区分（旧予防も含む）
 // 画面のプルダウン用の表記
 const CATEGORY_SHORT = {
   [CATEGORY_RENTAL]: '貸与',
@@ -1476,16 +1475,6 @@ const emptyReport = (settings) => ({
   updatedAt: Date.now(),
 });
 
-// 数値欄の意味は区分で異なる: 貸与=レンタル単位数、特定福祉用具(販売)=価格(円)
-const reportSummary = (report) => {
-  const rental = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).length;
-  const specific = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).length;
-  const amt = (s) => toInt(s.units) * Math.max(1, toInt(s.qty) || 1);
-  const units = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).reduce((sum, s) => sum + amt(s), 0);
-  const sales = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((sum, s) => sum + amt(s), 0);
-  return { rental, specific, units, sales };
-};
-
 // ===== 印刷帳票HTML生成（A4縦 / 明朝・ネイビーの企業文書） =====
 function buildPrintHTML(report, photoMap) {
   // 未選択のときに別営業所の情報を誤って印字しないよう、既定値へのフォールバックはしない
@@ -1645,7 +1634,7 @@ function buildPrintHTML(report, photoMap) {
         <div class="ptable-title">
           レンタル単位数一覧${tableChunks.length > 1 ? `（${ci + 1}/${tableChunks.length}）` : ''}
         </div>
-        ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回納品した用具</div>' : ''}
+        ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回の報告書に記載した用具</div>' : ''}
         ${tableHTML(chunk, ci === tableChunks.length - 1)}
         <div class="pfooter">${pages.length + ci + 1} / ${totalPages} ページ</div>
       </div>
@@ -1999,7 +1988,8 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-slate-400 shrink-0">数量</span>
               <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.qty}
-                onChange={e => onUpdate(s.id, { qty: digitsOnly(e.target.value) })} />
+                onChange={e => onUpdate(s.id, { qty: digitsOnly(e.target.value) })}
+                onBlur={e => { const n = toInt(e.target.value); if (n < 1) onUpdate(s.id, { qty: '1' }); }} />
             </div>
           </div>
           <input className={inputCls} value={s.note} maxLength={40} placeholder="メモ（帳票に印字・40字まで）"
@@ -2209,8 +2199,16 @@ function App() {
   };
 
   // 写真実体は消さない（保存前の編集は取り消せる必要がある）。実体回収は起動時GCに一本化
-  // ゴミ箱は確認なしで即削除（保存前なら「読み込み直す」で戻せる）
+  // 中身のあるカード（写真・商品名・単位数のいずれかが入っている）だけ確認する。
+  // 空のカードは押し間違えても失うものが無いので、確認なしで消して手数を増やさない。
   const removeSet = useCallback((s) => {
+    const hasContent = !!(s.photoId || (s.productName || '').trim() || toInt(s.units) || (s.note || '').trim());
+    if (hasContent) {
+      const label = (s.productName || '').trim() || s.item || '';
+      const what = label ? `「${label}」の明細` : 'この明細';
+      const withPhoto = s.photoId ? '\n（添付した写真も外れます）' : '';
+      if (!confirm(`${what}を削除しますか？${withPhoto}`)) return;
+    }
     setReport(r => ({ ...r, updatedAt: Date.now(), sets: r.sets.filter(x => x.id !== s.id) }));
   }, []);
 
@@ -2643,12 +2641,28 @@ function App() {
     try {
       const docs = holder.querySelectorAll('.doc');
       if (!docs.length) return;
+      // 取り込み倍率＝PDFの解像度。A4幅210mmに対し scale2=192dpi / scale3=288dpi。
+      // 印刷標準の300dpiに近い3を既定とするが、1ページあたり約32MBのcanvasを使うため
+      // 古いスマホでは確保に失敗する。端末のメモリ量で下げ、さらに失敗したら2で撮り直す。
+      const lowMemory = (navigator.deviceMemory && navigator.deviceMemory <= 4);
+      let scale = lowMemory ? 2 : 3;
+      const capture = async (el) => {
+        try {
+          return await html2canvas(el, { scale, useCORS: true, backgroundColor: '#ffffff' });
+        } catch (e) {
+          if (scale <= 2) throw e;
+          scale = 2; // メモリ不足でcanvasを作れない端末は解像度を落として続行する
+          return await html2canvas(el, { scale, useCORS: true, backgroundColor: '#ffffff' });
+        }
+      };
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       for (let i = 0; i < docs.length; i++) {
         setBusy(`PDFを生成中… ${i + 1}/${docs.length}ページ`);
         await new Promise(r => setTimeout(r, 30)); // ページ間でUIスレッドに制御を返す
-        const canvas = await html2canvas(docs[i], { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-        const img = canvas.toDataURL('image/jpeg', 0.9);
+        const canvas = await capture(docs[i]);
+        // canvasが空（幅0＝メモリ確保に失敗）のまま進むと白紙PDFができるので、ここで止める
+        if (!canvas || !canvas.width || !canvas.height) throw new Error('ページを画像化できませんでした');
+        const img = canvas.toDataURL('image/jpeg', 0.92);
         if (i > 0) pdf.addPage();
         // 実寸比で貼付（コンテンツがA4を超えた場合は歪ませず末尾で切る）
         const imgHmm = canvas.height * 210 / canvas.width;
@@ -3141,13 +3155,15 @@ function App() {
                             <input inputMode="numeric"
                               className="w-full border-0 bg-transparent px-1 py-0.5 text-right tabular-nums focus:outline-none focus:bg-blue-50"
                               value={importedRowUnits(row, 1)}
-                              onChange={e => updateImportedRow(i, { m1Units: toInt(e.target.value), units: toInt(row.m2Units) ? row.units : toInt(e.target.value) })} />
+                              onChange={e => { const n = Math.max(0, toInt(e.target.value));
+                                updateImportedRow(i, { m1Units: n, units: toInt(row.m2Units) ? row.units : n }); }} />
                           </td>
                           <td className="border border-slate-200 p-0.5">
                             <input inputMode="numeric"
                               className="w-full border-0 bg-transparent px-1 py-0.5 text-right tabular-nums focus:outline-none focus:bg-blue-50"
                               value={importedRowUnits(row, 2)}
-                              onChange={e => updateImportedRow(i, { m2Units: toInt(e.target.value), units: toInt(e.target.value) || toInt(row.m1Units) })} />
+                              onChange={e => { const n = Math.max(0, toInt(e.target.value));
+                                updateImportedRow(i, { m2Units: n, units: n || toInt(row.m1Units) }); }} />
                           </td>
                           <td className="border border-slate-200 text-center p-0.5">
                             <button className="text-slate-300 hover:text-rose-500 p-1" title="この行を削除"
