@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>福祉用具相談報告書 作成 - 太陽シルバーサービス</title>
+<!-- favicon をインラインで持つ（外部ファイル不要＝単一HTMLのまま。未指定だと毎回 /favicon.ico が404になる） -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231e3a8a'/%3E%3Crect x='9' y='7' width='14' height='18' rx='2' fill='%23fff'/%3E%3Cg fill='%231e3a8a'%3E%3Crect x='12' y='11' width='8' height='2'/%3E%3Crect x='12' y='15' width='8' height='2'/%3E%3Crect x='12' y='19' width='5' height='2'/%3E%3C/g%3E%3C/svg%3E">
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   /* 印刷: holder のみを出力する（DOM注入方式） */
@@ -218,10 +220,15 @@ const saveStorage = (key, data) => {
   try {
     const serialized = JSON.stringify(data);
     if (saveStorageCache[key] === serialized) return true;
-    saveStorageCache[key] = serialized;
     localStorage.setItem(key, serialized);
+    // 書込みが成功してからキャッシュする。失敗した値をキャッシュすると、
+    // 次回の保存で「同じ値だから書かなくてよい」と誤判定して永久に保存されなくなる。
+    saveStorageCache[key] = serialized;
     return true;
-  } catch { return false; }
+  } catch {
+    delete saveStorageCache[key];
+    return false;
+  }
 };
 const removeStorage = (key) => { try { delete saveStorageCache[key]; localStorage.removeItem(key); } catch {} };
 
@@ -239,13 +246,20 @@ const fmtDateJa = (iso) => {
   if (!m) return iso;
   return `${m[1]}年${Number(m[2])}月${Number(m[3])}日`;
 };
-const toInt = (v) => { const n = parseInt(String(v ?? '').replace(/[^\d-]/g, ''), 10); return isNaN(n) ? 0 : n; };
+// 全角数字・全角記号を半角へ寄せる。日本語IMEでは数字が全角で確定されることが多く、
+// 変換しないと「単位数を入力したのに何も入らない」状態になる。
+const toHalfWidth = (v) => String(v ?? '')
+  .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+  .replace(/[，、]/g, ',').replace(/[－ー−‐―]/g, '-').replace(/　/g, ' ');
+// 数字だけを取り出す（全角数字・カンマ付き・「226単位」等にも対応）
+const digitsOnly = (v) => toHalfWidth(v).replace(/[^\d]/g, '');
+const toInt = (v) => { const n = parseInt(toHalfWidth(v).replace(/[^\d-]/g, ''), 10); return isNaN(n) ? 0 : n; };
 
 // TAISコード正規化: 数字11桁 → #####-######
 const normalizeTais = (v) => {
-  const digits = String(v ?? '').replace(/[^\d]/g, '');
+  const digits = digitsOnly(v);
   if (digits.length === 11) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
-  return String(v ?? '').trim();
+  return toHalfWidth(v).trim();
 };
 
 // ===== インポートデータの無害化（バックアップJSONは信頼しない） =====
@@ -293,7 +307,55 @@ const sanitizeImportedReport = (r) => ({
   updatedAt: toInt(r && r.updatedAt) || Date.now(),
 });
 
-// AI/通信エラーを営業担当向けの日本語メッセージに変換
+// 取込一覧の1行から、ある月の単位数を求める。
+// 月別が取れていない古いデータ・旧様式（1行=1明細のCSV等）は代表値 units を当月に出す。
+// 画面の編集表・帳票のどちらもこの関数だけを使う（画面と紙で合計が食い違わないようにする）。
+const importedRowUnits = (r, which) => {
+  const v = which === 1 ? toInt(r && r.m1Units) : toInt(r && r.m2Units);
+  if (!v && which === 1 && !toInt(r && r.m2Units)) return toInt(r && r.units);
+  return v;
+};
+
+// 旧バージョンで保存された報告書には importedRows 等が無く、そのまま開くと
+// 画面が真っ白になる（undefined.length）。読み込み・複製時に必ずここを通して形を揃える。
+const normalizeReport = (r) => {
+  if (!r || typeof r !== 'object') return null;
+  const rows = (Array.isArray(r.importedRows) ? r.importedRows : []).map(x => {
+    const row = { ...x, m1Units: toInt(x && x.m1Units), m2Units: toInt(x && x.m2Units), units: toInt(x && x.units) };
+    // 月別が空で代表値だけある行は、当月へ寄せて画面・帳票の合計を一致させる
+    if (!row.m1Units && !row.m2Units && row.units) row.m1Units = row.units;
+    return row;
+  });
+  return {
+    ...r,
+    clientName: typeof r.clientName === 'string' ? r.clientName : '',
+    careManager: typeof r.careManager === 'string' ? r.careManager : '',
+    cmOffice: typeof r.cmOffice === 'string' ? r.cmOffice : '',
+    staff: typeof r.staff === 'string' ? r.staff : '',
+    office: typeof r.office === 'string' ? r.office : '',
+    remarks: typeof r.remarks === 'string' ? r.remarks : '',
+    deliveryDate: typeof r.deliveryDate === 'string' ? r.deliveryDate : '',
+    reportType: REPORT_TYPES.includes(r.reportType) ? r.reportType : '納品',
+    sets: Array.isArray(r.sets) ? r.sets.filter(Boolean) : [],
+    importedRows: rows,
+    importMonths: Array.isArray(r.importMonths) ? r.importMonths : [],
+    importSource: typeof r.importSource === 'string' ? r.importSource : '',
+    showRemarks: !!r.showRemarks,
+    showImportTable: r.showImportTable === undefined ? true : !!r.showImportTable,
+    highlightDelivered: r.highlightDelivered === undefined ? true : !!r.highlightDelivered,
+    updatedAt: toInt(r.updatedAt) || Date.now(),
+  };
+};
+const normalizeReports = (list) => (Array.isArray(list) ? list.map(normalizeReport).filter(Boolean) : []);
+const normalizeDrafts = (map) => {
+  const out = {};
+  if (map && typeof map === 'object') {
+    for (const [k, v] of Object.entries(map)) { const n = normalizeReport(v); if (n) out[k] = n; }
+  }
+  return out;
+};
+
+// AI/通信・ファイル読み取りエラーを営業担当向けの日本語メッセージに変換
 const friendlyError = (err) => {
   const msg = String((err && err.message) || err || '');
   const status = err && err.status;
@@ -301,6 +363,10 @@ const friendlyError = (err) => {
   if (status === 429) return 'アクセスが集中しています。少し待ってからもう一度お試しください';
   if (status >= 500) return 'AIサービス側が混み合っています。時間をおいて再試行してください';
   if (/connection|network|fetch|timed?\s?out/i.test(msg)) return '通信できませんでした。電波状況を確認して再試行してください';
+  // ライブラリが返す英語メッセージは現場では意味が分からないので日本語に置き換える
+  if (/invalid pdf|pdf structure|password|xref/i.test(msg)) return 'PDFファイルを開けませんでした。ファイルが壊れていないか、別名で保存し直してお試しください';
+  if (/invalid zip|zip data|end of central|unzip/i.test(msg)) return 'Excelファイルを開けませんでした。ファイルが壊れていないか、Excelで開いて保存し直してお試しください';
+  if (/JSON|Unexpected token/i.test(msg)) return 'ファイルの中身を読み取れませんでした。正しいファイルか確認してください';
   return msg.slice(0, 120);
 };
 
@@ -593,6 +659,23 @@ function xlsxToRows(arrayBuffer) {
   })) || sheets[0];
 }
 
+// CSVの文字コードを判定してテキスト化する。
+// 日本語版Excelの「CSV(カンマ区切り)」は既定が Shift_JIS(CP932) のため、
+// UTF-8 として読むと全部文字化けし「商品情報を読み取れません」になってしまう。
+function csvBufferToText(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  // BOM付きUTF-8 / UTF-16 は素直に判定できる
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder('utf-16be').decode(bytes);
+  try {
+    // 不正なUTF-8バイト列なら例外になる → Shift_JIS とみなす
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    try { return new TextDecoder('shift_jis').decode(bytes); } catch { return new TextDecoder('utf-8').decode(bytes); }
+  }
+}
+
 // CSV（カンマ／タブ、ダブルクォート対応）
 function csvToRows(text) {
   const sep = (text.split('\n')[0] || '').includes('\t') ? '\t' : ',';
@@ -695,8 +778,16 @@ function parseRowsAsUnitReport(rows) {
   const cTais = findCol(hr, /TAIS/i) >= 0 ? findCol(hr, /TAIS/i) : D.tais;
   const cKubun = findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) >= 0
     ? findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) : D.kubun;
-  const cRate = findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) >= 0
-    ? findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) : D.rate;
+  // 「料金区分」を優先して探す。先に /^区分$/ を許すと、左側にある取引区分（納品・解約）の
+  // 列を掴んでしまい、半月／月額が取れず帳票の料金区分が空欄（―）になる
+  const cRateExact = findColAround([hr + 2, hr + 1, hr], /^料金区分$/);
+  const cRateLoose = findColAround([hr + 2, hr + 1, hr], /^区分$/);
+  // 候補列に実際に「半月／月額／日割」が入っているかで最終判断する
+  const rateColHasValues = (c) => c >= 0 && rows.slice(hr + 1, hr + 40).some(row => /(半月|月額|日割)/.test(String((row || [])[c] || '')));
+  const cRate = cRateExact >= 0 ? cRateExact
+    : (rateColHasValues(cRateLoose) ? cRateLoose
+    : (rateColHasValues(D.rate) ? D.rate
+    : (cRateLoose >= 0 ? cRateLoose : D.rate)));
   const cPrice = findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) >= 0
     ? findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) : D.price;
 
@@ -880,7 +971,7 @@ function parseHeaderFromRows(rows) {
   rows.forEach((cells, ri) => {
     cells.forEach((c, ci) => { if (c) spans.push({ text: c, page: 1, x: ci * 10, y: -ri * 10 }); });
   });
-  return parseReportHeader(spans);
+  return parseReportHeader(spans, { noAddressBlock: true });
 }
 
 // ===== 単位数報告書のヘッダー情報（利用者名・居宅・ケアマネ・担当）を抽出 =====
@@ -916,8 +1007,10 @@ const headerLabelOf = (t) => {
   return null;
 };
 
-function parseReportHeader(spans) {
+function parseReportHeader(spans, opts) {
   const found = {};
+  // 表データ(Excel/CSV)由来のspansは座標が擬似的なので、位置に頼る宛先ブロック推定は使わない
+  const useAddressBlock = !(opts && opts.noAddressBlock);
   // 先に「ラベルだけのセル → 隣（右 or 次）の値」を拾う。
   // 正規表現を先に走らせると、"居宅介護支援事業所" が短い "居宅" にマッチして
   // 残りの "介護支援事業所" を値と誤認するため、この順序が重要。
@@ -948,7 +1041,7 @@ function parseReportHeader(spans) {
   //   1行目＝居宅（事業所）名 / 2行目＝ケアマネ名  という並びからも判定する。
   // 例) 苅田町地域包括支援センターおばせ / 長谷川 晴美 様
   //     ケアプランサービス 紡ぐ / 福島 寿恵
-  if (!found.cmOffice || !found.careManager) {
+  if (useAddressBlock && (!found.cmOffice || !found.careManager)) {
     const page1 = spans.filter(s => s.page === 1);
     const greet = page1.find(s => /(お世話になって|単位数を報告|ご報告申し上げ|平素)/.test(s.text));
     const greetY = greet ? greet.y : (Math.max(...page1.map(s => s.y), 0) - 160);
@@ -958,7 +1051,9 @@ function parseReportHeader(spans) {
       /指定事業者番号|TEL|FAX|〒|住所|電話/i.test(t) ||
       /単位数報告書|福祉用具貸与/.test(t) ||                  // 帳票タイトル
       /^[\d\s\/\-年月日:：.]+$/.test(t) ||                    // 日付・ページ番号
-      /^[\d\-]{6,}$/.test(t.replace(/\s/g, ''))               // バーコード等の番号
+      /^[\d\-]{6,}$/.test(t.replace(/\s/g, '')) ||            // バーコード等の番号
+      isHeaderCell(t) ||                                      // 表の見出しセル（区分・単位数 等）
+      /^(商品名|品目|種目|数量|単価|金額|合計|備考|メーカー|型番)$/.test(t.replace(/[\s　]/g, ''))
     );
     // 人名らしさ: 2〜6文字・英数字を含まない・組織語を含まない
     const ORG_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
@@ -1395,7 +1490,6 @@ const reportSummary = (report) => {
 function buildPrintHTML(report, photoMap) {
   // 未選択のときに別営業所の情報を誤って印字しないよう、既定値へのフォールバックはしない
   const office = OFFICE_MASTER.find(o => o.name === report.office) || null;
-  const { rental, specific, units, sales } = reportSummary(report);
   const e = escapeHTML;
 
   const cardHTML = (s, idx) => {
@@ -1497,12 +1591,7 @@ function buildPrintHTML(report, photoMap) {
   const hasM2 = rows.some(r => toInt(r.m2Units) > 0);
   const m1Head = months[0] || '単位数';
   const m2Head = months[1] || '単位数';
-  const unitOf = (r, which) => {
-    const v = which === 1 ? toInt(r.m1Units) : toInt(r.m2Units);
-    // 月別が取れていない行は代表値を1列目に出す
-    if (!v && which === 1 && !toInt(r.m2Units)) return toInt(r.units);
-    return v;
-  };
+  const unitOf = importedRowUnits; // 画面の編集表と同じ計算式（合計が食い違わないようにする）
   const sum1 = rows.reduce((a, r) => a + unitOf(r, 1), 0);
   const sum2 = rows.reduce((a, r) => a + unitOf(r, 2), 0);
 
@@ -1609,7 +1698,6 @@ function buildPrintHTML(report, photoMap) {
       border-top: 0.2mm solid #1e3a8a; border-bottom: 1mm solid #1e3a8a;
     }
     #print-content-holder.pdf-capture .ptype { border-bottom: 3.8mm solid #1e3a8a; }
-    #print-content-holder .punits { margin-left: auto; font-size: 10.5pt; }
     #print-content-holder .premarks { border: 1px solid #93c5fd; border-radius: 1.5mm; margin-bottom: 3.5mm; }
     #print-content-holder .premarks-title {
       background: #dbeafe; color: #1e3a8a; font-weight: bold; font-size: 9pt;
@@ -1716,6 +1804,42 @@ const btn = (color) =>
 
 const inputCls = 'h-9 px-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 w-full';
 const labelCls = 'text-xs font-bold text-slate-500 mb-0.5 block';
+
+// ===== エラー境界 =====
+// 想定外の例外でも画面全体が真っ白にならないようにする。
+// 現場では「白い画面＝壊れた」と判断されて報告書の作成自体が止まるため、
+// 必ず日本語の案内と復旧手段（一覧へ戻る／再読み込み）を出す。
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error) { try { window.__appErrors.push(String(error && error.message || error)); } catch {} }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="max-w-lg mx-auto p-4">
+        <div className="bg-white border border-rose-300 rounded-lg shadow-sm p-5 mt-10">
+          <div className="flex items-center gap-2 text-rose-600 font-bold mb-2">
+            <AlertTriangle size={20} /> 画面の表示中に問題が発生しました
+          </div>
+          <p className="text-sm text-slate-600 leading-relaxed">
+            保存済みの報告書・写真は消えていません。下のボタンから作業を続けられます。
+            繰り返し発生する場合は、一覧下の「全データをエクスポート」でバックアップを取ってからご連絡ください。
+          </p>
+          <div className="flex gap-2 mt-4">
+            <button className={`${btn('blue')} flex-1 justify-center`}
+              onClick={() => { this.setState({ error: null }); if (this.props.onReset) this.props.onReset(); }}>
+              <ArrowLeft size={16} /> 報告書の一覧へ戻る
+            </button>
+            <button className={`${btn('slate')} flex-1 justify-center`} onClick={() => location.reload()}>
+              再読み込み
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-3 break-all">詳細：{String(this.state.error && this.state.error.message || this.state.error)}</p>
+        </div>
+      </div>
+    );
+  }
+}
 
 function Toast({ toast }) {
   if (!toast) return null;
@@ -1869,13 +1993,13 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
             <div className="flex items-center gap-1">
               <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.units}
                 placeholder={isSale ? '価格' : '単位数'}
-                onChange={e => onUpdate(s.id, { units: e.target.value.replace(/[^\d]/g, '') })} />
+                onChange={e => onUpdate(s.id, { units: digitsOnly(e.target.value) })} />
               <span className="text-[10px] text-slate-400 shrink-0">{isSale ? '円' : '単位'}</span>
             </div>
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-slate-400 shrink-0">数量</span>
               <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.qty}
-                onChange={e => onUpdate(s.id, { qty: e.target.value.replace(/[^\d]/g, '') })} />
+                onChange={e => onUpdate(s.id, { qty: digitsOnly(e.target.value) })} />
             </div>
           </div>
           <input className={inputCls} value={s.note} maxLength={40} placeholder="メモ（帳票に印字・40字まで）"
@@ -1889,7 +2013,7 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
 // ===== メインアプリ =====
 function App() {
   const [view, setView] = useState('list');
-  const [reports, setReports] = useState(() => loadStorage(STORAGE_KEYS.REPORTS, []));
+  const [reports, setReports] = useState(() => normalizeReports(loadStorage(STORAGE_KEYS.REPORTS, [])));
   const [settings, setSettings] = useState(() => {
     const s = { office: '', staff: '', apiKey: '', aiModel: 'claude-opus-4-8', ...loadStorage(STORAGE_KEYS.SETTINGS, {}) };
     if (!AI_ENABLED) s.apiKey = ''; // AI機能OFF時は保管済みキーを残さない
@@ -1900,7 +2024,7 @@ function App() {
   const [master, setMaster] = useState(() => cleanMaster(loadStorage(STORAGE_KEYS.MASTER, [])).list);
   const [masterPick, setMasterPick] = useState(null); // マスタから選ぶダイアログの選択状態
   const [masterOpen, setMasterOpen] = useState(false); // メイン画面の商品マスタ開閉
-  const [drafts, setDrafts] = useState(() => loadStorage(STORAGE_KEYS.DRAFTS, {}));
+  const [drafts, setDrafts] = useState(() => normalizeDrafts(loadStorage(STORAGE_KEYS.DRAFTS, {})));
   const [report, setReport] = useState(null);
   const [photoCache, setPhotoCache] = useState({});
   const [busy, setBusy] = useState(null);
@@ -1928,10 +2052,22 @@ function App() {
   }, []);
 
   // 永続化
-  useEffect(() => { saveStorage(STORAGE_KEYS.REPORTS, reports); }, [reports]);
-  useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
-  useEffect(() => { saveStorage(STORAGE_KEYS.MASTER, master); }, [master]);
-  useEffect(() => { saveStorage(STORAGE_KEYS.DRAFTS, drafts); }, [drafts]);
+  // 端末の保存容量が尽きた場合などに書込みが失敗する。黙って失敗すると
+  // 「保存した」と思ったデータが再読み込みで消えるため、必ず利用者へ知らせる。
+  const storageFailed = useRef(false);
+  const persist = useCallback((key, data) => {
+    const ok = saveStorage(key, data);
+    if (!ok && !storageFailed.current) {
+      storageFailed.current = true;
+      showToast('この端末に保存できませんでした（保存容量が不足している可能性があります）。\n一覧下の「全データをエクスポート」でバックアップを取り、不要な報告書を削除してください', 'error');
+    }
+    if (ok) storageFailed.current = false;
+    return ok;
+  }, [showToast]);
+  useEffect(() => { persist(STORAGE_KEYS.REPORTS, reports); }, [reports, persist]);
+  useEffect(() => { persist(STORAGE_KEYS.SETTINGS, settings); }, [settings, persist]);
+  useEffect(() => { persist(STORAGE_KEYS.MASTER, master); }, [master, persist]);
+  useEffect(() => { persist(STORAGE_KEYS.DRAFTS, drafts); }, [drafts, persist]);
 
   // 編集中ドラフトの自動保存（800msデバウンス・報告書ID別・未編集ならドラフト化しない）
   useEffect(() => {
@@ -2031,13 +2167,14 @@ function App() {
   };
   const openReport = (r) => {
     const src = drafts[r.id] || r; // 同じ報告書の未保存下書きがあれば優先して開く
-    const copy = JSON.parse(JSON.stringify(src));
+    // 旧バージョンで保存された報告書でも必ず開けるよう、ここで形を揃える
+    const copy = normalizeReport(JSON.parse(JSON.stringify(src)));
     openSnapshotRef.current = drafts[r.id] ? null : JSON.stringify(copy);
     setReport(copy); setView('edit');
   };
   const resumeDraft = (d) => {
     openSnapshotRef.current = null; // 下書きは常に未保存扱い
-    setReport(JSON.parse(JSON.stringify(d))); setView('edit');
+    setReport(normalizeReport(JSON.parse(JSON.stringify(d)))); setView('edit');
   };
   const discardDraft = (d) => {
     if (!confirm(`「${d.clientName || '無題'} 様邸」の下書きを破棄しますか？`)) return;
@@ -2093,13 +2230,17 @@ function App() {
     if (!report.office) { showToast('営業所を選択してください（帳票の発行元になります）', 'error'); return; }
     const rep = { ...report, deliveryDate: report.deliveryDate || todayISO(), updatedAt: Date.now() };
     clearTimeout(draftTimer.current); // 保存直前のデバウンスで下書きが復活しないように
+    // 先に端末へ書き込み、成功したときだけ「保存しました」と下書き削除を行う。
+    // 書込みに失敗したまま下書きを消すと、入力内容がどこにも残らず消えてしまう。
+    const idx = reports.findIndex(r => r.id === rep.id);
+    const nextReports = [...reports];
+    if (idx >= 0) nextReports[idx] = rep; else nextReports.unshift(rep);
+    if (!persist(STORAGE_KEYS.REPORTS, nextReports)) {
+      // persist 側でエラー内容を案内済み。下書きは残すので入力は失われない
+      return;
+    }
     setReport(rep);
-    setReports(list => {
-      const idx = list.findIndex(r => r.id === rep.id);
-      const next = [...list];
-      if (idx >= 0) next[idx] = rep; else next.unshift(rep);
-      return next;
-    });
+    setReports(nextReports);
     setMaster(m => upsertMaster(m, rep.sets));
     setDrafts(ds => { const n = { ...ds }; delete n[rep.id]; return n; });
     openSnapshotRef.current = JSON.stringify(rep);
@@ -2118,7 +2259,7 @@ function App() {
   };
 
   const duplicateReport = (r) => {
-    const copy = JSON.parse(JSON.stringify(r));
+    const copy = normalizeReport(JSON.parse(JSON.stringify(r)));
     copy.id = genId('rp');
     copy.deliveryDate = todayISO();
     copy.updatedAt = Date.now();
@@ -2301,11 +2442,15 @@ function App() {
         ...r, updatedAt: Date.now(),
         importSource: sourceName,
         importMonths: months,
-        importedRows: cands.map(c => ({
-          productName: c.productName, tais: c.tais, units: c.units,
-          kubun: c.kubun, item: c.item, category: c.category,
-          rate: c.rate || '', m1Units: toInt(c.m1Units), m2Units: toInt(c.m2Units),
-        })),
+        importedRows: cands.map(c => {
+          const m1 = toInt(c.m1Units), m2 = toInt(c.m2Units), u = toInt(c.units);
+          return {
+            productName: c.productName, tais: c.tais, units: u,
+            kubun: c.kubun, item: c.item, category: c.category, rate: c.rate || '',
+            // 月別の内訳が無い様式（1行=1明細のCSV等）は代表値を当月に入れておく
+            m1Units: (!m1 && !m2) ? u : m1, m2Units: m2,
+          };
+        }),
       }));
     }
     // ヘッダー情報は空欄のみ補完（入力済みは上書きしない）
@@ -2336,7 +2481,7 @@ function App() {
     setPendingDoc(null);
     try {
       if (isExcel || isCsv) {
-        const rows = isExcel ? xlsxToRows(await file.arrayBuffer()) : csvToRows(await file.text());
+        const rows = isExcel ? xlsxToRows(await file.arrayBuffer()) : csvToRows(csvBufferToText(await file.arrayBuffer()));
         const parsed = parseRowsAsUnitReport(rows);
         if (!parsed.cands.length) {
           showToast('この表から商品情報（TAISコード）を読み取れませんでした。列の並びをご確認ください', 'error');
@@ -2558,7 +2703,7 @@ function App() {
         }
       }
       // 報告書: 構造・型を強制してから取り込む
-      const incoming = (Array.isArray(payload.reports) ? payload.reports : []).slice(0, 500).map(sanitizeImportedReport);
+      const incoming = (Array.isArray(payload.reports) ? payload.reports : []).slice(0, 500).map(r => normalizeReport(sanitizeImportedReport(r)));
       setReports(list => {
         const map = new Map(list.map(r => [r.id, r]));
         for (const r of incoming) {
@@ -2779,7 +2924,7 @@ function App() {
           <li><b>商品マスタ</b>：一度使った商品名は自動で覚えます。次回は「マスタから選ぶ」でチェックするだけで明細に入ります。</li>
           <li><b>特定福祉用具</b>（入浴補助用具・腰掛便座など）は単位数報告書に載らないため、専用ボタンから追加します。金額は「価格（円）」で入力します。</li>
           <li><b>取込データの一覧表</b>：取り込んだ報告書の全明細を2枚目に付けられます。納品した用具に色が付くので、ケアマネジャーが確認しやすくなります（不要ならチェックを外せます）。</li>
-          <li><b>合計単位数</b>：既定では印字しません。必要なときだけチェックを入れてください。</li>
+          <li><b>合計単位数</b>：取込データの一覧表を付けると、その表の最下行に月ごとの合計が印字されます。</li>
           <li><b>下書き</b>：保存せずに閉じても内容は残ります。一覧の黄色い帯から再開できます。</li>
           <li><b>複製</b>：毎月のモニタリングは、前回の報告書を複製すると入力が省けます（写真と報告事項は引き継ぎません）。</li>
         </ul>
@@ -2878,7 +3023,7 @@ function App() {
       },
     };
     return (
-      <div className="max-w-4xl mx-auto p-3 md:p-4 pb-36 relative" {...pageDrop}>
+      <div className="max-w-4xl mx-auto px-3 pt-3 md:px-4 md:pt-4 pb-36 relative" {...pageDrop}>
         {dropOver && (
           <div className="fixed inset-0 z-50 bg-emerald-600/15 border-4 border-dashed border-emerald-500 flex items-center justify-center pointer-events-none">
             <div className="bg-white rounded-xl shadow-xl px-6 py-4 text-emerald-700 font-bold flex flex-col items-center gap-1 text-center">
@@ -2995,14 +3140,14 @@ function App() {
                           <td className="border border-slate-200 p-0.5">
                             <input inputMode="numeric"
                               className="w-full border-0 bg-transparent px-1 py-0.5 text-right tabular-nums focus:outline-none focus:bg-blue-50"
-                              value={row.m1Units || 0}
-                              onChange={e => updateImportedRow(i, { m1Units: toInt(e.target.value) })} />
+                              value={importedRowUnits(row, 1)}
+                              onChange={e => updateImportedRow(i, { m1Units: toInt(e.target.value), units: toInt(row.m2Units) ? row.units : toInt(e.target.value) })} />
                           </td>
                           <td className="border border-slate-200 p-0.5">
                             <input inputMode="numeric"
                               className="w-full border-0 bg-transparent px-1 py-0.5 text-right tabular-nums focus:outline-none focus:bg-blue-50"
-                              value={row.m2Units || 0}
-                              onChange={e => updateImportedRow(i, { m2Units: toInt(e.target.value), units: toInt(e.target.value) || row.units })} />
+                              value={importedRowUnits(row, 2)}
+                              onChange={e => updateImportedRow(i, { m2Units: toInt(e.target.value), units: toInt(e.target.value) || toInt(row.m1Units) })} />
                           </td>
                           <td className="border border-slate-200 text-center p-0.5">
                             <button className="text-slate-300 hover:text-rose-500 p-1" title="この行を削除"
@@ -3013,10 +3158,10 @@ function App() {
                       <tr className="bg-slate-100 font-bold text-slate-700">
                         <td className="border border-slate-200 px-1 py-1 text-center" colSpan={5}>合　計</td>
                         <td className="border border-slate-200 px-2 py-1 text-right tabular-nums">
-                          {report.importedRows.reduce((a, r) => a + toInt(r.m1Units), 0).toLocaleString()}
+                          {report.importedRows.reduce((a, r) => a + importedRowUnits(r, 1), 0).toLocaleString()}
                         </td>
                         <td className="border border-slate-200 px-2 py-1 text-right tabular-nums">
-                          {report.importedRows.reduce((a, r) => a + toInt(r.m2Units), 0).toLocaleString()}
+                          {report.importedRows.reduce((a, r) => a + importedRowUnits(r, 2), 0).toLocaleString()}
                         </td>
                         <td className="border border-slate-200"></td>
                       </tr>
@@ -3483,7 +3628,26 @@ window.__appErrors = [];
 window.addEventListener('error', (e) => window.__appErrors.push(String(e.message)));
 window.addEventListener('unhandledrejection', (e) => window.__appErrors.push(String(e.reason)));
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+// App 全体をエラー境界で包む。復旧は App の再マウント（key更新）で行う:
+// 保存済みデータ・下書きは localStorage/IndexedDB にあるため、作り直しても内容は失われない。
+function AppRoot() {
+  const [generation, setGeneration] = useState(0);
+  return (
+    <ErrorBoundary key={generation} onReset={() => {
+      // プレビュー用に body/holder へ当てた固定レイアウトを元に戻してから作り直す
+      try {
+        const holder = document.getElementById('print-content-holder');
+        if (holder) { holder.innerHTML = ''; holder.removeAttribute('style'); }
+        document.body.style.overflow = '';
+      } catch {}
+      setGeneration(g => g + 1);
+    }}>
+      <App />
+    </ErrorBoundary>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<AppRoot />);
 </script>
 </body>
 </html>
