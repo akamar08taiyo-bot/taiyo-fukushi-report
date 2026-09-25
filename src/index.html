@@ -218,8 +218,9 @@ const saveStorage = (key, data) => {
   try {
     const serialized = JSON.stringify(data);
     if (saveStorageCache[key] === serialized) return true;
-    saveStorageCache[key] = serialized;
     localStorage.setItem(key, serialized);
+    // 書込みに成功してから記録する（失敗時に記録すると、同じ内容での再保存がスキップされる）
+    saveStorageCache[key] = serialized;
     return true;
   } catch { return false; }
 };
@@ -695,8 +696,11 @@ function parseRowsAsUnitReport(rows) {
   const cTais = findCol(hr, /TAIS/i) >= 0 ? findCol(hr, /TAIS/i) : D.tais;
   const cKubun = findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) >= 0
     ? findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) : D.kubun;
-  const cRate = findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) >= 0
-    ? findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) : D.rate;
+  // 「料金区分」を優先して探す。同じ見出し行に対応区分の「区分」列（納品・解約など）が
+  // 左側にあると、/^(料金区分|区分)$/ では先にそちらが一致し、半月・月額が取れなかった。
+  const cRateExact = findColAround([hr + 2, hr + 1, hr], /^料金区分$/);
+  const cRate = cRateExact >= 0 ? cRateExact
+    : (findColAround([hr + 2, hr + 1, hr], /^区分$/) >= 0 ? findColAround([hr + 2, hr + 1, hr], /^区分$/) : D.rate);
   const cPrice = findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) >= 0
     ? findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) : D.price;
 
@@ -1927,11 +1931,15 @@ function App() {
     toastTimer.current = setTimeout(() => setToast(null), type === 'error' ? 5000 : 2600);
   }, []);
 
-  // 永続化
-  useEffect(() => { saveStorage(STORAGE_KEYS.REPORTS, reports); }, [reports]);
+  // 永続化。端末の保存容量不足などで書き込めなかった場合は、保存できたように見せず必ず知らせる
+  // （以前は失敗しても「保存しました」と表示され、再読み込みで報告書が消えていた）
+  const warnSaveFailed = useCallback((what) => {
+    showToast(`${what}をこの端末に保存できませんでした。容量不足の可能性があります。古い報告書を「全データをエクスポート」で退避してから削除してください`, 'error');
+  }, [showToast]);
+  useEffect(() => { if (!saveStorage(STORAGE_KEYS.REPORTS, reports)) warnSaveFailed('報告書'); }, [reports]);
   useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
   useEffect(() => { saveStorage(STORAGE_KEYS.MASTER, master); }, [master]);
-  useEffect(() => { saveStorage(STORAGE_KEYS.DRAFTS, drafts); }, [drafts]);
+  useEffect(() => { if (!saveStorage(STORAGE_KEYS.DRAFTS, drafts)) warnSaveFailed('下書き'); }, [drafts]);
 
   // 編集中ドラフトの自動保存（800msデバウンス・報告書ID別・未編集ならドラフト化しない）
   useEffect(() => {
