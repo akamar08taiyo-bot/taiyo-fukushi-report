@@ -87,15 +87,16 @@ const OFFICE_MASTER = [
   { name: '福岡南営業所', postal: '816-0912', address: '福岡県大野城市御笠川2-10-15',          phone: '092-504-9810', fax: '092-504-9811', manager: '神谷 大輔' },
   { name: '福岡西営業所', postal: '814-0032', address: '福岡県福岡市早良区小田部4-11-31',      phone: '092-833-0131', fax: '092-833-0132', manager: '佐藤 正利' },
   { name: '福岡東営業所', postal: '812-0064', address: '福岡県福岡市東区松田3丁目25-2',        phone: '092-627-1150', fax: '092-627-1151', manager: '岡本 将臣' },
-  { name: '久留米営業所', postal: '838-0814', address: '福岡県朝倉郡筑前町高田585-1',          phone: '0946-21-5355', fax: '0946-21-5356', manager: '牟田 知広' },
+  // 久留米・大分は見積アプリ(taiyo-mitsumori)で自社の見積書カバー(2025-02-01版)と照合して更新済みの最新情報に合わせる
+  { name: '久留米営業所', postal: '838-0141', address: '福岡県小郡市小郡97-19',                  phone: '0942-72-8822', fax: '0942-72-8833', manager: '牟田 知広' },
   { name: '大牟田営業所', postal: '837-0924', address: '福岡県大牟田市歴木446-1',              phone: '0944-59-1488', fax: '0944-59-1481', manager: '橋本 浩志' },
   { name: '佐賀営業所',   postal: '849-0937', address: '佐賀県佐賀市鍋島5丁目4-15',            phone: '0952-34-1224', fax: '0952-34-1225', manager: '江原 諒' },
   { name: '長崎営業所',   postal: '851-0122', address: '長崎県長崎市界2丁目2-4',               phone: '095-834-0535', fax: '095-834-0536', manager: '吉本 幸治' },
   { name: '大村営業所',   postal: '856-0844', address: '長崎県大村市溝陸町643-1',              phone: '0957-49-6222', fax: '0957-49-6333', manager: '山口 隆史' },
-  { name: '壱岐営業所',   postal: '811-5117', address: '長崎県壱岐市郷ノ浦町中触1078',         phone: '0920-47-9005', fax: '0920-47-9006', manager: '長岡 計治' },
+  { name: '壱岐営業所',   postal: '811-5117', address: '長崎県壱岐市郷ノ浦町田中触1078',         phone: '0920-47-9005', fax: '0920-47-9006', manager: '長岡 計治' },
   { name: '熊本営業所',   postal: '862-0945', address: '熊本県熊本市東区画図町大字下無田1432-22', phone: '096-377-7630', fax: '096-377-7631', manager: '城戸 健' },
   { name: '熊本北営業所', postal: '861-5517', address: '熊本県熊本市北区鶴羽田1-10-7',         phone: '096-341-5765', fax: '096-341-5766', manager: '高木 伸基' },
-  { name: '大分営業所',   postal: '870-0142', address: '大分県大分市三川下2-7-8',              phone: '097-555-9684', fax: '097-555-9685', manager: '山下 厚' },
+  { name: '大分営業所',   postal: '870-0953', address: '大分県大分市下郡東1-4-35',            phone: '097-504-8001', fax: '097-504-8002', manager: '山下 厚' },
 ];
 
 // ポータル(taiyo-portal)でログイン済みなら、その営業所を初期値として使う（同一オリジンのlocalStorageを参照するだけ）
@@ -218,8 +219,9 @@ const saveStorage = (key, data) => {
   try {
     const serialized = JSON.stringify(data);
     if (saveStorageCache[key] === serialized) return true;
-    saveStorageCache[key] = serialized;
     localStorage.setItem(key, serialized);
+    // 書込みに成功してから記録する（失敗時に記録すると、同じ内容での再保存がスキップされる）
+    saveStorageCache[key] = serialized;
     return true;
   } catch { return false; }
 };
@@ -695,8 +697,11 @@ function parseRowsAsUnitReport(rows) {
   const cTais = findCol(hr, /TAIS/i) >= 0 ? findCol(hr, /TAIS/i) : D.tais;
   const cKubun = findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) >= 0
     ? findColAround([hr, hr + 1], /対応\s*内容|対応区分|取引区分/) : D.kubun;
-  const cRate = findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) >= 0
-    ? findColAround([hr + 2, hr + 1, hr], /^(料金区分|区分)$/) : D.rate;
+  // 「料金区分」を優先して探す。同じ見出し行に対応区分の「区分」列（納品・解約など）が
+  // 左側にあると、/^(料金区分|区分)$/ では先にそちらが一致し、半月・月額が取れなかった。
+  const cRateExact = findColAround([hr + 2, hr + 1, hr], /^料金区分$/);
+  const cRate = cRateExact >= 0 ? cRateExact
+    : (findColAround([hr + 2, hr + 1, hr], /^区分$/) >= 0 ? findColAround([hr + 2, hr + 1, hr], /^区分$/) : D.rate);
   const cPrice = findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) >= 0
     ? findColAround([hr, hr + 1, hr + 2], /月額\s*料金|販売価格|価格/) : D.price;
 
@@ -771,7 +776,9 @@ function parseRowsAsUnitReport(rows) {
 
   // ⑤ ヘッダー情報（利用者名・居宅・ケアマネ・担当者）
   const header = {};
-  const ORG_WORD_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
+  const ORG_WORD_RE = /(株式会社|有限会社|社会福祉協議会|協議会|社協|法人|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|福祉|介護|クリニック|医院|病院|施設|ホーム|の家|苑|園)/;
+  // 自社（太陽シルバーサービス）の発行元ブロックの内容。居宅事業所として拾わない。
+  const SELF_BLOCK_RE = /(太陽|ｼﾙﾊﾞｰ|シルバー|指定事業者番号|事業者番号|TEL|FAX|〒|担当\s*[:：])/i;
   const cleanHeaderValue = (value) => stripSama(String(value == null ? '' : value)
     .replace(/^[:：\s　]+/, '').replace(/御中\s*$/, '').trim());
   const usableHeaderValue = (value) => {
@@ -819,18 +826,47 @@ function parseRowsAsUnitReport(rows) {
   }
 
   const topValues = rows.slice(0, hr + 1).flat().filter(v => usableHeaderValue(v));
+  // 右隣（空セルを挟んでも4列以内）の最初の値が敬称「様」だけのセルか
+  const honorificRightOf = (r, c) => {
+    for (let k = 1; k <= 4; k++) { const n = at(r, c + k); if (n) return /^[様殿]$/.test(n); }
+    return false;
+  };
+  // 宛先ブロック（用紙左上）は「1行目＝居宅介護支援事業所名 / 2行目＝ケアマネ名 様」の並び。
+  // 「○○ 様」のセルを見つけ、その真上（数行以内）にある事業所名を居宅として採用する。
+  // 例) 苅田町社会福祉協議会 / 工藤 紀子 様（右側にある自社の「指定事業者番号…」等は拾わない）
   if (!header.cmOffice) {
-    const office = topValues.find(v => ORG_WORD_RE.test(v) && !/太陽|ｼﾙﾊﾞｰ|シルバー/.test(v));
+    outer:
+    for (let r = 0; r < rows.length && r <= hr; r++) {
+      for (let c = 0; c < nCols; c++) {
+        const v = at(r, c);
+        const addressed = /[様殿]\s*$/.test(v) || (!!v && honorificRightOf(r, c));
+        if (!addressed || personScore(v) < 0 || cleanHeaderValue(v) === header.clientName) continue;
+        for (let k = 1; k <= 3 && r - k >= 0; k++) {
+          const above = [at(r - k, c), ...(rows[r - k] || []).slice(0, c + 3)]
+            .find(x => usableHeaderValue(x) && !SELF_BLOCK_RE.test(x) && personScore(x) < 0);
+          if (above) { header.cmOffice = cleanHeaderValue(above).slice(0, 30); break outer; }
+        }
+      }
+    }
+  }
+  if (!header.cmOffice) {
+    const office = topValues.find(v => ORG_WORD_RE.test(v) && !SELF_BLOCK_RE.test(v));
     if (office) header.cmOffice = cleanHeaderValue(office).slice(0, 30);
   }
   if (!header.careManager) {
     // 宛先の「○○ 様」を優先。利用者名セルは敬称が別セルなので混同しない。
     const addressed = topValues.filter(v => /[様殿]\s*$/.test(v));
+    // 敬称「様」が別のセルに分かれている様式（「工藤 紀子｜様」）も宛名として扱う
+    for (let r = 0; r < rows.length && r <= hr; r++) {
+      for (let c = 0; c < nCols; c++) {
+        if (usableHeaderValue(at(r, c)) && honorificRightOf(r, c)) addressed.push(at(r, c));
+      }
+    }
     header.careManager = bestPerson(addressed.filter(v => cleanHeaderValue(v) !== header.clientName));
   }
   // 旧SMART様式（B2＝居宅名 / B3＝ケアマネ名）も維持する。
   const b2 = at(1, 1), b3 = at(2, 1);
-  if (!header.cmOffice && usableHeaderValue(b2)) header.cmOffice = cleanHeaderValue(b2).slice(0, 30);
+  if (!header.cmOffice && usableHeaderValue(b2) && !SELF_BLOCK_RE.test(b2)) header.cmOffice = cleanHeaderValue(b2).slice(0, 30);
   if (!header.careManager && personScore(b3) >= 0) header.careManager = cleanHeaderValue(b3).slice(0, 12);
   Object.keys(header).forEach(k => { if (!header[k]) delete header[k]; });
 
@@ -961,7 +997,7 @@ function parseReportHeader(spans) {
       /^[\d\-]{6,}$/.test(t.replace(/\s/g, ''))               // バーコード等の番号
     );
     // 人名らしさ: 2〜6文字・英数字を含まない・組織語を含まない
-    const ORG_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
+    const ORG_RE = /(株式会社|有限会社|社会福祉協議会|協議会|社協|法人|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|福祉|介護|クリニック|医院|病院|施設|ホーム|の家|苑|園)/;
     const isPerson = (t) => {
       const v = t.replace(/[様殿\s　]/g, '');
       return v.length >= 2 && v.length <= 6 && !/[0-9A-Za-zＡ-Ｚａ-ｚ０-９]/.test(v) && !ORG_RE.test(t);
@@ -1927,11 +1963,15 @@ function App() {
     toastTimer.current = setTimeout(() => setToast(null), type === 'error' ? 5000 : 2600);
   }, []);
 
-  // 永続化
-  useEffect(() => { saveStorage(STORAGE_KEYS.REPORTS, reports); }, [reports]);
+  // 永続化。端末の保存容量不足などで書き込めなかった場合は、保存できたように見せず必ず知らせる
+  // （以前は失敗しても「保存しました」と表示され、再読み込みで報告書が消えていた）
+  const warnSaveFailed = useCallback((what) => {
+    showToast(`${what}をこの端末に保存できませんでした。容量不足の可能性があります。古い報告書を「全データをエクスポート」で退避してから削除してください`, 'error');
+  }, [showToast]);
+  useEffect(() => { if (!saveStorage(STORAGE_KEYS.REPORTS, reports)) warnSaveFailed('報告書'); }, [reports]);
   useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
   useEffect(() => { saveStorage(STORAGE_KEYS.MASTER, master); }, [master]);
-  useEffect(() => { saveStorage(STORAGE_KEYS.DRAFTS, drafts); }, [drafts]);
+  useEffect(() => { if (!saveStorage(STORAGE_KEYS.DRAFTS, drafts)) warnSaveFailed('下書き'); }, [drafts]);
 
   // 編集中ドラフトの自動保存（800msデバウンス・報告書ID別・未編集ならドラフト化しない）
   useEffect(() => {
