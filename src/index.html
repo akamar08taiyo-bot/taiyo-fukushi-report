@@ -776,7 +776,9 @@ function parseRowsAsUnitReport(rows) {
 
   // ⑤ ヘッダー情報（利用者名・居宅・ケアマネ・担当者）
   const header = {};
-  const ORG_WORD_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
+  const ORG_WORD_RE = /(株式会社|有限会社|社会福祉協議会|協議会|社協|法人|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|福祉|介護|クリニック|医院|病院|施設|ホーム|の家|苑|園)/;
+  // 自社（太陽シルバーサービス）の発行元ブロックの内容。居宅事業所として拾わない。
+  const SELF_BLOCK_RE = /(太陽|ｼﾙﾊﾞｰ|シルバー|指定事業者番号|事業者番号|TEL|FAX|〒|担当\s*[:：])/i;
   const cleanHeaderValue = (value) => stripSama(String(value == null ? '' : value)
     .replace(/^[:：\s　]+/, '').replace(/御中\s*$/, '').trim());
   const usableHeaderValue = (value) => {
@@ -824,18 +826,47 @@ function parseRowsAsUnitReport(rows) {
   }
 
   const topValues = rows.slice(0, hr + 1).flat().filter(v => usableHeaderValue(v));
+  // 右隣（空セルを挟んでも4列以内）の最初の値が敬称「様」だけのセルか
+  const honorificRightOf = (r, c) => {
+    for (let k = 1; k <= 4; k++) { const n = at(r, c + k); if (n) return /^[様殿]$/.test(n); }
+    return false;
+  };
+  // 宛先ブロック（用紙左上）は「1行目＝居宅介護支援事業所名 / 2行目＝ケアマネ名 様」の並び。
+  // 「○○ 様」のセルを見つけ、その真上（数行以内）にある事業所名を居宅として採用する。
+  // 例) 苅田町社会福祉協議会 / 工藤 紀子 様（右側にある自社の「指定事業者番号…」等は拾わない）
   if (!header.cmOffice) {
-    const office = topValues.find(v => ORG_WORD_RE.test(v) && !/太陽|ｼﾙﾊﾞｰ|シルバー/.test(v));
+    outer:
+    for (let r = 0; r < rows.length && r <= hr; r++) {
+      for (let c = 0; c < nCols; c++) {
+        const v = at(r, c);
+        const addressed = /[様殿]\s*$/.test(v) || (!!v && honorificRightOf(r, c));
+        if (!addressed || personScore(v) < 0 || cleanHeaderValue(v) === header.clientName) continue;
+        for (let k = 1; k <= 3 && r - k >= 0; k++) {
+          const above = [at(r - k, c), ...(rows[r - k] || []).slice(0, c + 3)]
+            .find(x => usableHeaderValue(x) && !SELF_BLOCK_RE.test(x) && personScore(x) < 0);
+          if (above) { header.cmOffice = cleanHeaderValue(above).slice(0, 30); break outer; }
+        }
+      }
+    }
+  }
+  if (!header.cmOffice) {
+    const office = topValues.find(v => ORG_WORD_RE.test(v) && !SELF_BLOCK_RE.test(v));
     if (office) header.cmOffice = cleanHeaderValue(office).slice(0, 30);
   }
   if (!header.careManager) {
     // 宛先の「○○ 様」を優先。利用者名セルは敬称が別セルなので混同しない。
     const addressed = topValues.filter(v => /[様殿]\s*$/.test(v));
+    // 敬称「様」が別のセルに分かれている様式（「工藤 紀子｜様」）も宛名として扱う
+    for (let r = 0; r < rows.length && r <= hr; r++) {
+      for (let c = 0; c < nCols; c++) {
+        if (usableHeaderValue(at(r, c)) && honorificRightOf(r, c)) addressed.push(at(r, c));
+      }
+    }
     header.careManager = bestPerson(addressed.filter(v => cleanHeaderValue(v) !== header.clientName));
   }
   // 旧SMART様式（B2＝居宅名 / B3＝ケアマネ名）も維持する。
   const b2 = at(1, 1), b3 = at(2, 1);
-  if (!header.cmOffice && usableHeaderValue(b2)) header.cmOffice = cleanHeaderValue(b2).slice(0, 30);
+  if (!header.cmOffice && usableHeaderValue(b2) && !SELF_BLOCK_RE.test(b2)) header.cmOffice = cleanHeaderValue(b2).slice(0, 30);
   if (!header.careManager && personScore(b3) >= 0) header.careManager = cleanHeaderValue(b3).slice(0, 12);
   Object.keys(header).forEach(k => { if (!header[k]) delete header[k]; });
 
@@ -966,7 +997,7 @@ function parseReportHeader(spans) {
       /^[\d\-]{6,}$/.test(t.replace(/\s/g, ''))               // バーコード等の番号
     );
     // 人名らしさ: 2〜6文字・英数字を含まない・組織語を含まない
-    const ORG_RE = /(株式会社|有限会社|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|クリニック|病院|施設|の家|苑|園)/;
+    const ORG_RE = /(株式会社|有限会社|社会福祉協議会|協議会|社協|法人|センター|事業所|事業者|ケアプラン|サービス|ステーション|支援|居宅|包括|福祉|介護|クリニック|医院|病院|施設|ホーム|の家|苑|園)/;
     const isPerson = (t) => {
       const v = t.replace(/[様殿\s　]/g, '');
       return v.length >= 2 && v.length <= 6 && !/[0-9A-Za-zＡ-Ｚａ-ｚ０-９]/.test(v) && !ORG_RE.test(t);
