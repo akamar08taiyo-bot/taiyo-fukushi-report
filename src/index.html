@@ -1736,7 +1736,7 @@ const XL_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
 
 // XMLに書けない制御文字を除いてからエスケープ（入力欄に紛れた制御文字でファイルが壊れないように）
 const xmlEsc = (v) => String(v ?? '')
-  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const xlCol = (c) => { let s = ''; for (let n = c; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
 const xlRef = (r, c) => `${xlCol(c)}${r}`;
@@ -1744,7 +1744,7 @@ const xlSheetRef = (name) => `'${String(name).replace(/'/g, "''")}'`;
 // ヘッダー/フッター文字列の「&」は制御コードなので二重にする
 const xlHfEsc = (s) => String(s ?? '').replace(/&/g, '&&');
 // 表示幅の目安（全角=1、半角=0.55）。結合セルは行の高さが自動調整されないため、折り返し行数の見積りに使う
-const xlTextWidth = (s) => [...String(s ?? '')].reduce((w, ch) => w + (/[\u0000-ÿ｡-ﾟ]/.test(ch) ? 0.55 : 1), 0);
+const xlTextWidth = (s) => [...String(s ?? '')].reduce((w, ch) => w + (/[\u0000-\u00FF\uFF61-\uFF9F]/.test(ch) ? 0.55 : 1), 0);
 const xlLines = (s, perLine) => String(s ?? '').split('\n')
   .reduce((n, l) => n + Math.max(1, Math.ceil(xlTextWidth(l) / perLine)), 0);
 
