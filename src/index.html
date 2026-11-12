@@ -740,8 +740,8 @@ function parseRowsAsUnitReport(rows) {
     const rawTais = at(r, cTais);
     // 明細の先頭行でなければ飛ばす（TAISも種目も無い行）
     if (!TAIS_RE.test(rawTais) && !/(貸与|販売|購入)/.test(service)) continue;
-    // 「保険外」品目は対象外（種目行・商品行のどちらに出てもスキップ）
-    if (/保険外/.test(rowText(r)) || /保険外/.test(rowText(r + 1))) continue;
+    // 「保険外」の行も商品名・TAIS・区分は取り込む（単位数一覧に載せない扱いは applyExtraction 側）
+    const outsideIns = /保険外/.test(rowText(r)) || /保険外/.test(rowText(r + 1));
 
     // 商品名は1つ下の行。既定列(B)が空なら、その行で最も長い日本語セルを採用
     let productName = cleanName(at(r + 1, D.name));
@@ -772,6 +772,7 @@ function parseRowsAsUnitReport(rows) {
       productName: productName.slice(0, 60), maker: '', tais, units,
       m1Units: m1, m2Units: m2, rate,
       item: norm ? norm.item : '', category: norm ? norm.category : CATEGORY_RENTAL, kubun,
+      outsideIns,
     });
   }
 
@@ -850,7 +851,7 @@ function parseRowsGeneric(rows) {
   for (const cells of rows) {
     const line = cells.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     if (!line) continue;
-    if (/保険外/.test(line)) continue;
+    const outsideIns = /保険外/.test(line);
     const tm = line.match(TAIS_RE);
     if (!tm) continue;
     const tais = `${tm[1]}-${tm[2]}`;
@@ -866,7 +867,8 @@ function parseRowsGeneric(rows) {
     if (!productName) continue;
     const nums = cells.filter(c => NUM_LIKE_RE.test(c)).map(toInt).filter(n => n > 0);
     const um = line.match(UNITS_RE);
-    const units = um ? toInt(um[1]) : (nums.length ? nums[nums.length - 1] : 0);
+    // 保険外の行は単位数の欄が「保険外」なので、残った数値（日数など）を単位数と誤読しない
+    const units = um ? toInt(um[1]) : (outsideIns ? 0 : (nums.length ? nums[nums.length - 1] : 0));
     const km = line.match(KUBUN_RE);
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
     const key = `${productName}|${tais}|${units}`;
@@ -875,6 +877,7 @@ function parseRowsGeneric(rows) {
     cands.push({
       productName: productName.slice(0, 60), maker: '', tais, units,
       item: norm ? norm.item : '', category: norm ? norm.category : CATEGORY_RENTAL, kubun,
+      outsideIns,
     });
   }
   return cands;
@@ -1055,8 +1058,10 @@ function parseRentalUnitReport(spans) {
     // 商品行は「商品名＋数値列」。PDFによっては列が1つのテキストとして繋がって
     // 取得されるため、span単位ではなく**文字列**として切り分ける。
     const rowText = lineText(next);
-    // 「保険外」品目は単位数報告書の対象外なので取り込まない
-    if (/保険外/.test(rowText) || /保険外/.test(lineText(rows[i]))) continue;
+    // 「保険外」の行も商品名・TAIS・区分は取り込む（単位数は0）。
+    // 認定申請中などで全行が保険外の報告書があり、行ごと捨てると何も取り込めなくなるため。
+    // 単位数の一覧表に載せない扱いは applyExtraction 側で行う。
+    const outsideIns = /保険外/.test(rowText) || /保険外/.test(lineText(rows[i]));
 
     // 区分（納品/引取…）の位置で切る。区分が無ければ「独立した数値」の位置で切る
     // （「2型」のように数字が商品名に含まれる場合を誤検出しないよう、前後が区切りの数値のみ対象）
@@ -1076,11 +1081,13 @@ function parseRentalUnitReport(spans) {
     const rateM = dataText.match(/(半月|月額|日割)/);
     const rate = rateM ? rateM[1] : '';
     const tail = rateM ? dataText.slice(rateM.index + rateM[1].length) : '';
-    const tailNums = (tail.match(/\d[\d,]*/g) || []).map(toInt);
+    // 単位数の欄が「保険外」の行もあるので、保険外も1列として数える（0扱い）。
+    // 数値だけを拾うと「2,260 21 保険外 31 保険外」の日数31を単位数と誤読する。
+    const tailNums = (tail.match(/保険外|\d[\d,]*/g) || []).map(toInt);
     const allNums = (dataText.match(/\d[\d,]*/g) || []).map(toInt);
     const m1 = tailNums.length >= 3 ? tailNums[2] : 0;   // 当月（半月なら日割り）分
     const m2 = tailNums.length >= 5 ? tailNums[4] : 0;   // 翌月分
-    const units = m2 || m1 || (allNums.length ? allNums[allNums.length - 1] : 0);
+    const units = outsideIns ? (m2 || m1) : (m2 || m1 || (allNums.length ? allNums[allNums.length - 1] : 0));
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
 
     cands.push({
@@ -1092,10 +1099,17 @@ function parseRentalUnitReport(spans) {
       item: norm.item,
       category: norm.category,
       kubun,
+      outsideIns,                      // 保険外の行（単位数一覧には載せない）
     });
   }
   return { cands, months };
 }
+
+// 帳票タイトルから「レンタル単位数報告書」かを判定する。
+// 単位数報告書なのに明細が読めなかった場合でも、カタログとして読み直すと
+// 発行元の社名やバーコード番号（1016873-826352 → TAIS誤認）を商品と取り違えるため、
+// 単位数報告書と分かればカタログ扱いには切り替えない。
+const isUnitReportDoc = (spans) => spans.some(s => /単位数報告書/.test(String(s.text || '').replace(/[\s　]/g, '')));
 
 // TAISコード・単位数の出現位置から、空間的（同ページ・同カラム・近傍）に
 // 商品名を探索して候補を組み立てる。表形式の単位数報告書は同一行から直接取れる。
@@ -2291,23 +2305,31 @@ function App() {
   // ---- レンタル単位数報告書（PDF）取込 ----
   // 抽出結果を候補ダイアログに載せ、ヘッダー情報（利用者名等）と全行を報告書へ反映
   const applyExtraction = (cands, header, kind, sourceName, months = []) => {
-    const delivered = cands.filter(c => c.kubun === '納品').length;
-    setPdfCands({
-      source: `${sourceName}（${kind}として読み取り）`,
-      // 単位数報告書は「納品」のみ既定でON（解約・引取などは一覧に残すがOFF）。
-      // カタログは区分の概念が無いので従来どおり全選択。
-      items: cands.map(c => ({
-        ...c, maker: '',
-        checked: kind === '単位数報告書' ? c.kubun === '納品' : true,
-      })),
-    });
+    // 保険外の行: 商品名・TAISは明細カード用の候補に出すが、単位数の一覧表（2枚目）には載せない。
+    // 保険内の行と混在する場合は既定OFF（従来どおり保険外は除外）。
+    // 全行が保険外（認定申請中など）の場合は、納品の行を既定ONにして取り込めるようにする。
+    const outside = cands.filter(c => c.outsideIns).length;
+    const allOutside = cands.length > 0 && outside === cands.length;
+    const isDefaultOn = (c) => c.kubun === '納品' && (!c.outsideIns || allOutside);
+    const delivered = cands.filter(isDefaultOn).length;
+    if (cands.length) {
+      setPdfCands({
+        source: `${sourceName}（${kind}として読み取り）`,
+        // 単位数報告書は「納品」のみ既定でON（解約・引取などは一覧に残すがOFF）。
+        // カタログは区分の概念が無いので従来どおり全選択。
+        items: cands.map(c => ({
+          ...c, maker: '',
+          checked: kind === '単位数報告書' ? isDefaultOn(c) : true,
+        })),
+      });
+    }
     // 単位数報告書なら、全行と取込元を保存（2枚目の一覧表用）
     if (kind === '単位数報告書') {
       setReport(r => ({
         ...r, updatedAt: Date.now(),
         importSource: sourceName,
         importMonths: months,
-        importedRows: cands.map(c => ({
+        importedRows: cands.filter(c => !c.outsideIns).map(c => ({
           productName: c.productName, tais: c.tais, units: c.units,
           kubun: c.kubun, item: c.item, category: c.category,
           rate: c.rate || '', m1Units: toInt(c.m1Units), m2Units: toInt(c.m2Units),
@@ -2315,20 +2337,31 @@ function App() {
       }));
     }
     // ヘッダー情報は空欄のみ補完（入力済みは上書きしない）
-    const filled = [];
+    // 案内文用の「補完した項目」は現在の画面の値から求める。setReport の更新関数は
+    // React のバッチ処理で後から実行されるため、その中で集めた結果はトースト時点では空になる。
+    const HEADER_KEYS = ['clientName', 'cmOffice', 'careManager', 'staff'];
+    const isBlank = (r, k) => !String((r && r[k]) || '').trim();
+    const filled = header ? HEADER_KEYS.filter(k => header[k] && isBlank(report, k)) : [];
     if (header && Object.keys(header).length) {
       setReport(r => {
         const next = { ...r, updatedAt: Date.now() };
-        for (const k of ['clientName', 'cmOffice', 'careManager', 'staff']) {
-          if (header[k] && !String(r[k] || '').trim()) { next[k] = header[k]; filled.push(k); }
+        for (const k of HEADER_KEYS) {
+          if (header[k] && isBlank(r, k)) next[k] = header[k];
         }
         return next;
       });
     }
     const labels = { clientName: '利用者名', cmOffice: '居宅', careManager: 'ケアマネ', staff: '担当者' };
     const headMsg = filled.length ? `／${filled.map(k => labels[k]).join('・')}も取り込みました` : '';
+    const outMsg = outside ? `／保険外${outside}件は単位数一覧に載せません` : '';
+    if (kind === '単位数報告書' && !cands.length) {
+      showToast(filled.length
+        ? `${filled.map(k => labels[k]).join('・')}を取り込みました。商品の行は読み取れなかったため、明細は手入力してください`
+        : '商品の行を読み取れませんでした。明細は手入力してください', filled.length ? undefined : 'error');
+      return;
+    }
     showToast(kind === '単位数報告書'
-      ? `${cands.length}件を抽出しました（納品${delivered}件を選択済み）${headMsg}`
+      ? `${cands.length}件を抽出しました（納品${delivered}件を選択済み）${outMsg}${headMsg}`
       : `${cands.length}件の商品候補を抽出しました。必要な行を選んで追加してください`);
   };
 
@@ -2360,8 +2393,13 @@ function App() {
       let cands = parsed.cands;
       let months = parsed.months;
       let kind = '単位数報告書';
-      if (!cands.length) { cands = parseCandidatesFromLines(spans); months = []; kind = 'カタログ'; }
-      if (cands.length) {
+      const isUnitReport = isUnitReportDoc(spans);
+      if (!cands.length && !isUnitReport) { cands = parseCandidatesFromLines(spans); months = []; kind = 'カタログ'; }
+      if (!cands.length && isUnitReport) {
+        // 明細は読めなくても、利用者名・居宅・ケアマネ・担当者は入れておく
+        // （「画像PDFの可能性」バナーは誤解を招くので出さない。案内はトーストで行う）
+        applyExtraction([], parseReportHeader(spans), kind, file.name, months);
+      } else if (cands.length) {
         setPendingDoc({ name: file.name, doc }); // 「AIで読み取り直す」用に保持
         applyExtraction(cands, kind === '単位数報告書' ? parseReportHeader(spans) : null, kind, file.name, months);
       } else {
@@ -2925,7 +2963,7 @@ function App() {
           {report.importSource && (
             <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2.5 py-1.5">
               <CheckCircle2 size={13} className="shrink-0" />
-              取込済み：{report.importSource}（{report.importedRows.length}行）
+              取込済み：{report.importSource}{report.importedRows.length ? `（${report.importedRows.length}行）` : '（単位数一覧に載せる行なし）'}
             </div>
           )}
           {!!report.importedRows.length && (
@@ -3291,13 +3329,17 @@ function App() {
                   {c.kubun && (
                     <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 shrink-0 ${c.kubun === '納品' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{c.kubun}</span>
                   )}
+                  {c.outsideIns && (
+                    <span className="text-[10px] font-bold rounded px-1.5 py-0.5 shrink-0 bg-amber-100 text-amber-700"
+                      title="単位数の欄が「保険外」の行です。明細カードには追加できますが、単位数の一覧表には載りません">保険外</span>
+                  )}
                   <span className="text-sm text-slate-800 truncate font-bold">{c.productName}</span>
                 </div>
                 {c.item && <div className="text-[11px] text-slate-500 truncate">{c.category === CATEGORY_PREVENTION ? '予防・' : c.category === CATEGORY_SPECIFIC ? '特定・' : ''}{c.item}</div>}
               </div>
               <span className="text-xs text-slate-500 tabular-nums shrink-0">{c.tais || 'TAIS未検出'}</span>
               <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">
-                {c.units ? (c.category === CATEGORY_SPECIFIC ? `¥${c.units.toLocaleString()}` : `${c.units.toLocaleString()}単位`) : '―'}
+                {c.units ? (c.category === CATEGORY_SPECIFIC ? `¥${c.units.toLocaleString()}` : `${c.units.toLocaleString()}単位`) : (c.outsideIns ? '保険外' : '―')}
               </span>
             </label>
           ))}
