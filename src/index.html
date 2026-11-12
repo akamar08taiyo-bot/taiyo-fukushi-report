@@ -266,6 +266,8 @@ const sanitizeImportedSet = (s) => ({
   maker: sanStr(s && s.maker, 60),
   tais: sanStr(s && s.tais, 20),
   units: toInt(s && s.units) ? String(toInt(s && s.units)) : '',
+  halfUnits: toInt(s && s.halfUnits) ? String(toInt(s && s.halfUnits)) : '',
+  outsideIns: !!(s && s.outsideIns),
   qty: String(Math.max(1, toInt(s && s.qty) || 1)),
   note: sanStr(s && s.note, 120),
 });
@@ -283,6 +285,7 @@ const sanitizeImportedReport = (r) => ({
   showRemarks: !!(r && r.showRemarks),
   showImportTable: r && r.showImportTable !== undefined ? !!r.showImportTable : true,
   highlightDelivered: r && r.highlightDelivered !== undefined ? !!r.highlightDelivered : true,
+  showUnitSummary: r && r.showUnitSummary !== undefined ? !!r.showUnitSummary : true,
   importSource: sanStr(r && r.importSource, 120),
   importMonths: Array.isArray(r && r.importMonths) ? r.importMonths.slice(0, 4).map(x => sanStr(x, 8)) : [],
   importedRows: Array.isArray(r && r.importedRows) ? r.importedRows.slice(0, 300).map(x => ({
@@ -1356,6 +1359,7 @@ function upsertMaster(master, sets) {
       category: s.category || '',
       item: s.item || '',
       units: toInt(s.units),
+      halfUnits: toInt(s.halfUnits),
       updatedAt: Date.now(),
     };
     if (idx >= 0) {
@@ -1367,6 +1371,7 @@ function upsertMaster(master, sets) {
         category: entry.category || old.category,
         item: entry.item || old.item,
         units: entry.units || old.units,
+        halfUnits: entry.halfUnits || old.halfUnits || 0,
       };
     } else {
       next.push(entry);
@@ -1379,6 +1384,8 @@ function upsertMaster(master, sets) {
 const emptySet = () => ({
   id: genId('st'), photoId: null, place: '', category: CATEGORY_RENTAL,
   item: '', productName: '', maker: '', tais: '', units: '', qty: '1', note: '',
+  halfUnits: '',      // 半月の単位数（料金区分が半月の月の単位数。月額は units）
+  outsideIns: false,  // 保険外（単位数なし）
 });
 
 const emptyReport = (settings) => ({
@@ -1397,6 +1404,7 @@ const emptyReport = (settings) => ({
   importMonths: [],        // 単位数の列見出し（例 ['7月','8月']）
   showImportTable: true,   // 取込一覧表を帳票に付けるか
   highlightDelivered: true,// 一覧表で納品分に色を付けるか
+  showUnitSummary: true,   // 1枚目の明細の下に「単位数・TAISのまとめ」を付けるか
   importSource: '',        // 取込元ファイル名（画面表示用。帳票には印字しない）
   updatedAt: Date.now(),
 });
@@ -1406,9 +1414,17 @@ const reportSummary = (report) => {
   const rental = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).length;
   const specific = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).length;
   const amt = (s) => toInt(s.units) * Math.max(1, toInt(s.qty) || 1);
-  const units = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category)).reduce((sum, s) => sum + amt(s), 0);
+  const units = report.sets.filter(s => RENTAL_CATEGORIES.includes(s.category) && !s.outsideIns).reduce((sum, s) => sum + amt(s), 0);
   const sales = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((sum, s) => sum + amt(s), 0);
   return { rental, specific, units, sales };
+};
+
+// 帳票カードの品目の右に出す貸与の単位数（例「月額 226単位／半月 113単位」）。保険外は「保険外」
+const setUnitsLabel = (s) => {
+  if (!s || s.category === CATEGORY_SPECIFIC) return '';
+  if (s.outsideIns) return '保険外';
+  const m = toInt(s.units), h = toInt(s.halfUnits);
+  return [m ? `月額 ${m.toLocaleString()}単位` : '', h ? `半月 ${h.toLocaleString()}単位` : ''].filter(Boolean).join('／');
 };
 
 // ===== 印刷帳票HTML生成（A4縦 / 明朝・ネイビーの企業文書） =====
@@ -1431,8 +1447,10 @@ function buildPrintHTML(report, photoMap) {
     const qty = Math.max(1, toInt(s.qty) || 1);
     // TAIS・価格は未入力の場合、帳票に空欄（―）を印字せず項目ごと非表示にする
     const taisPart = s.tais ? `<span>TAIS：${e(s.tais)}</span>` : '';
-    const pricePart = num ? `<span>${isSale ? '価格' : '単位数'}：${unitsDisp}</span>` : '';
+    // 貸与の単位数は品目の右（月額・半月）に出す。販売品の価格は従来どおり TAIS の行の右
+    const pricePart = (isSale && num) ? `<span>価格：${unitsDisp}</span>` : '';
     const row4 = (taisPart || pricePart) ? `<div class="pcap-row4">${taisPart}${pricePart}</div>` : '';
+    const rentalUnits = isSale ? '' : setUnitsLabel(s);
     return `
     <div class="pcard">
       <div class="pimg">${photo
@@ -1440,7 +1458,7 @@ function buildPrintHTML(report, photoMap) {
         : '<span class="pnoimg">写真なし</span>'}</div>
       <div class="pcap">
         <div class="pcap-row1"><span class="pbadge">${idx + 1}</span>${s.place ? `<span class="pplace">納品箇所：${e(s.place)}</span>` : ''}</div>
-        <div class="pcap-row2">${catShort ? `［${catShort}］` : ''}${e(s.item || '（品目未設定）')}${qty > 1 ? `　×${qty}` : ''}</div>
+        <div class="pcap-row2"><span>${catShort ? `［${catShort}］` : ''}${e(s.item || '（品目未設定）')}${qty > 1 ? `　×${qty}` : ''}</span>${rentalUnits ? `<span class="pcap-units">${rentalUnits}</span>` : ''}</div>
         <div class="pcap-row3">${e(s.productName || '')}</div>
         ${row4}
         ${s.note ? `<div class="pcap-note">${e(s.note)}</div>` : ''}
@@ -1462,6 +1480,20 @@ function buildPrintHTML(report, photoMap) {
   pages.push(sets.slice(0, page1Rows * 2));
   let i = page1Rows * 2;
   while (i < sets.length) { pages.push(sets.slice(i, i + 6)); i += 6; }
+
+  // 明細の下の「単位数・TAISのまとめ」。最後の明細のページの空いた所に入ればそこへ、入らなければ次のページに1枚足す
+  const useSummary = report.showUnitSummary !== false && sets.length > 0;
+  const hasRental = sets.some(s => s.category !== CATEGORY_SPECIFIC);
+  const hasSale = sets.some(s => s.category === CATEGORY_SPECIFIC);
+  // 行の高さは商品名の折り返しで変わる（商品名の欄は全角で約15字/行。半角は0.5字と数える）
+  const nameLines = (t) => Math.max(1, Math.ceil([...String(t || '')].reduce((n, ch) => n + (/[ -~｡-ﾟ]/.test(ch) ? 0.5 : 1), 0) / 15));
+  const summaryMm = 22 + sets.reduce((mm, s) => mm + 6.2 + 4.6 * (nameLines(s.productName) - 1), 0)
+    + 6.5 * ((hasRental ? 1 : 0) + (hasSale ? 1 : 0));
+  const lastIdx = pages.length - 1;
+  const lastRowsMm = Math.ceil(pages[lastIdx].length / 2) * ROW_MM;
+  const lastAvail = lastIdx === 0 ? page1Avail : 272 - 12; // 2枚目以降は見出し1行
+  const summaryOnLast = useSummary && lastRowsMm + summaryMm <= lastAvail;
+  const summaryOwnPage = useSummary && !summaryOnLast;
 
   const headerFirst = `
     <div class="phead">
@@ -1510,7 +1542,7 @@ function buildPrintHTML(report, photoMap) {
   for (let i = 0; useTable && i < rows.length; i += ROWS_PER_TABLE_PAGE) {
     tableChunks.push(rows.slice(i, i + ROWS_PER_TABLE_PAGE));
   }
-  const totalPages = pages.length + tableChunks.length;
+  const totalPages = pages.length + (summaryOwnPage ? 1 : 0) + tableChunks.length;
 
   // 単位数の列見出し（例 7月・8月）。取れていない場合は「単位数」1列で出す。
   const months = Array.isArray(report.importMonths) ? report.importMonths : [];
@@ -1557,6 +1589,63 @@ function buildPrintHTML(report, photoMap) {
       </tbody>
     </table>`;
 
+  // 単位数・TAISのまとめ（全部の明細の TAIS・月額/半月の単位数と、その合計）
+  const summaryHTML = () => {
+    const rentalSets = sets.filter(s => s.category !== CATEGORY_SPECIFIC);
+    const amt = (s, key) => toInt(s[key]) * Math.max(1, toInt(s.qty) || 1);
+    const counted = rentalSets.filter(s => !s.outsideIns && toInt(s.units));
+    const monthSum = counted.reduce((a, s) => a + amt(s, 'units'), 0);
+    // 半月の合計は、単位数のある貸与がみな半月の単位数を持つときだけ出す（月額の用具がまざると「半月の合計」にならないため）
+    const allHalf = counted.length > 0 && counted.every(s => toInt(s.halfUnits));
+    const halfSum = allHalf ? counted.reduce((a, s) => a + amt(s, 'halfUnits'), 0) : 0;
+    const showHalf = rentalSets.some(s => toInt(s.halfUnits));
+    const saleSum = sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((a, s) => a + amt(s, 'units'), 0);
+    const cat = (s) => s.category === CATEGORY_SPECIFIC ? '特定' : '貸与';
+    const unitCell = (s, key) => {
+      if (s.category === CATEGORY_SPECIFIC) return key === 'units' && toInt(s.units) ? `¥${toInt(s.units).toLocaleString()}` : '';
+      if (s.outsideIns) return '保険外';
+      return toInt(s[key]) ? toInt(s[key]).toLocaleString() : '―';
+    };
+    return `
+    <div class="psum">
+      <div class="psum-title">単位数・TAISコードのまとめ</div>
+      <table class="ptable psum-table">
+        <colgroup>
+          <col style="width:5%"><col style="width:7%"><col style="width:${showHalf ? 12 : 14}%"><col style="width:${showHalf ? 30 : 39}%">
+          <col style="width:15%"><col style="width:6%"><col style="width:${showHalf ? 12.5 : 14}%">${showHalf ? '<col style="width:12.5%">' : ''}
+        </colgroup>
+        <thead><tr>
+          <th>No.</th><th>区分</th><th>品目</th><th>商品名</th><th>TAISコード</th><th>数量</th>
+          <th>${hasRental ? '月額単位数' : '価格'}</th>${showHalf ? '<th>半月単位数</th>' : ''}
+        </tr></thead>
+        <tbody>
+          ${sets.map((s, k) => `
+          <tr>
+            <td class="pc-center">${k + 1}</td>
+            <td class="pc-center">${cat(s)}</td>
+            <td class="pc-center">${e(s.item || '')}</td>
+            <td class="pc-name">${e(s.productName || '')}</td>
+            <td class="pc-center">${e(s.tais || '―')}</td>
+            <td class="pc-center">${Math.max(1, toInt(s.qty) || 1)}</td>
+            <td class="pc-num">${unitCell(s, 'units')}</td>
+            ${showHalf ? `<td class="pc-num">${s.category === CATEGORY_SPECIFIC ? '' : unitCell(s, 'halfUnits')}</td>` : ''}
+          </tr>`).join('')}
+          ${hasRental ? `
+          <tr class="prow-total">
+            <td class="pc-center" colspan="6">貸与の合計単位数</td>
+            <td class="pc-num">${counted.length || !rentalSets.some(s => s.outsideIns) ? monthSum.toLocaleString() : '保険外'}</td>
+            ${showHalf ? `<td class="pc-num">${allHalf ? halfSum.toLocaleString() : '―'}</td>` : ''}
+          </tr>` : ''}
+          ${hasSale ? `
+          <tr class="prow-total">
+            <td class="pc-center" colspan="6">特定福祉用具の合計金額</td>
+            <td class="pc-num" ${showHalf ? 'colspan="2"' : ''}>¥${saleSum.toLocaleString()}</td>
+          </tr>` : ''}
+        </tbody>
+      </table>
+    </div>`;
+  };
+
   const pagesHTML = pages.map((pageSets, p) => {
     let offset = 0;
     for (let k = 0; k < p; k++) offset += pages[k].length;
@@ -1566,10 +1655,18 @@ function buildPrintHTML(report, photoMap) {
         ${p === 0 ? headerFirst : headerCont(p + 1)}
         <div class="pgrid">${pageSets.map((s, k) => cardHTML(s, offset + k)).join('')}</div>
         ${p === 0 && sets.length === 0 ? '<div class="pnone">（今回の報告に用具の明細はありません）</div>' : ''}
+        ${summaryOnLast && p === lastIdx ? summaryHTML() : ''}
         <div class="pfooter">${p + 1} / ${totalPages} ページ</div>
       </div>
     </div>`;
-  }).join('') + tableChunks.map((chunk, ci) => `
+  }).join('') + (summaryOwnPage ? `
+    <div class="doc">
+      <div class="page">
+        ${headerCont()}
+        ${summaryHTML()}
+        <div class="pfooter">${pages.length + 1} / ${totalPages} ページ</div>
+      </div>
+    </div>` : '') + tableChunks.map((chunk, ci) => `
     <div class="doc">
       <div class="page">
         ${headerCont()}
@@ -1578,7 +1675,7 @@ function buildPrintHTML(report, photoMap) {
         </div>
         ${report.highlightDelivered ? '<div class="ptable-legend"><span class="plegend-box"></span>色付き＝今回納品した用具</div>' : ''}
         ${tableHTML(chunk, ci === tableChunks.length - 1)}
-        <div class="pfooter">${pages.length + ci + 1} / ${totalPages} ページ</div>
+        <div class="pfooter">${pages.length + (summaryOwnPage ? 1 : 0) + ci + 1} / ${totalPages} ページ</div>
       </div>
     </div>`).join('');
 
@@ -1666,7 +1763,18 @@ function buildPrintHTML(report, photoMap) {
     }
     #print-content-holder.pdf-capture .pbadge { border-bottom: 4mm solid #1e3a8a; }
     #print-content-holder .pplace { font-size: 10pt; font-weight: bold; color: #111827; }
-    #print-content-holder .pcap-row2 { font-size: 9.5pt; color: #111827; font-weight: bold; }
+    #print-content-holder .pcap-row2 {
+      font-size: 9.5pt; color: #111827; font-weight: bold;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 2mm;
+    }
+    #print-content-holder .pcap-units { color: #1e3a8a; white-space: nowrap; font-size: 9pt; }
+    /* 明細の下の「単位数・TAISのまとめ」 */
+    #print-content-holder .psum { margin-top: 4mm; page-break-inside: avoid; break-inside: avoid; }
+    #print-content-holder .psum-title {
+      font-size: 10.5pt; font-weight: bold; color: #1e3a8a; margin-bottom: 1.5mm;
+      border-left: 1.2mm solid #1e3a8a; padding-left: 2mm; line-height: 1.3;
+    }
+    #print-content-holder .psum-table td, #print-content-holder .psum-table th { padding: 1mm 1.5mm; }
     #print-content-holder .pcap-row3 { font-size: 9.5pt; color: #1f2937; overflow-wrap: anywhere; }
     #print-content-holder .pcap-row4 {
       display: flex; justify-content: space-between; font-size: 9pt; color: #1f2937; font-weight: bold; margin-top: 0.5mm;
@@ -1882,21 +1990,42 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
             <option value="">納品箇所（任意）</option>
             {PLACES.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
-            <input className={`${inputCls} col-span-2 md:col-span-1 tabular-nums`} inputMode="numeric" value={s.tais} placeholder="TAISコード"
+          {/* TAISは1段まるごと（前は3分の1の幅で「01265-000」と途中で切れていた）。
+              貸与は 月額・半月 の単位数を分けて持つ（帳票のカードと「単位数・TAISのまとめ」に出す） */}
+          <div className="grid grid-cols-3 gap-1.5">
+            <input className={`${inputCls} col-span-2 tabular-nums`} inputMode="numeric" value={s.tais} placeholder="TAISコード"
               onChange={e => onUpdate(s.id, { tais: e.target.value })}
               onBlur={e => onUpdate(s.id, { tais: normalizeTais(e.target.value) })} />
-            <div className="flex items-center gap-1">
+            {isSale ? <span /> : (
+              <label className={`flex items-center justify-center gap-1 text-[11px] font-bold rounded-md border cursor-pointer select-none
+                ${s.outsideIns ? 'bg-amber-50 border-amber-300 text-amber-700' : 'border-slate-200 text-slate-400'}`}
+                title="単位数の欄が「保険外」の用具。帳票には単位数の代わりに「保険外」と出ます">
+                <input type="checkbox" className="w-3.5 h-3.5 accent-amber-600" checked={!!s.outsideIns}
+                  onChange={e => onUpdate(s.id, { outsideIns: e.target.checked })} />
+                保険外
+              </label>
+            )}
+            <label className={isSale ? 'col-span-2' : ''}>
+              <span className="text-[10px] text-slate-400 block leading-tight">{isSale ? '価格（円）' : '月額の単位数'}</span>
               <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.units}
-                placeholder={isSale ? '価格' : '単位数'}
+                placeholder={isSale ? '価格' : (s.outsideIns ? '保険外' : '月額')} disabled={!isSale && !!s.outsideIns}
+                style={!isSale && s.outsideIns ? { background: '#f8fafc' } : undefined}
                 onChange={e => onUpdate(s.id, { units: e.target.value.replace(/[^\d]/g, '') })} />
-              <span className="text-[10px] text-slate-400 shrink-0">{isSale ? '円' : '単位'}</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-slate-400 shrink-0">数量</span>
+            </label>
+            {!isSale && (
+              <label>
+                <span className="text-[10px] text-slate-400 block leading-tight">半月の単位数</span>
+                <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.halfUnits || ''}
+                  placeholder={s.outsideIns ? '保険外' : '半月'} disabled={!!s.outsideIns}
+                  style={s.outsideIns ? { background: '#f8fafc' } : undefined}
+                  onChange={e => onUpdate(s.id, { halfUnits: e.target.value.replace(/[^\d]/g, '') })} />
+              </label>
+            )}
+            <label>
+              <span className="text-[10px] text-slate-400 block leading-tight">数量</span>
               <input className={`${inputCls} text-right tabular-nums`} inputMode="numeric" value={s.qty}
                 onChange={e => onUpdate(s.id, { qty: e.target.value.replace(/[^\d]/g, '') })} />
-            </div>
+            </label>
           </div>
           <input className={inputCls} value={s.note} maxLength={40} placeholder="メモ（帳票に印字・40字まで）"
             onChange={e => onUpdate(s.id, { note: e.target.value })} />
@@ -2085,6 +2214,7 @@ function App() {
           category: (!s.item && hit.category) ? hit.category : s.category,
           item: s.item || hit.item,
           units: toInt(s.units) ? s.units : (hit.units ? String(hit.units) : s.units),
+          halfUnits: toInt(s.halfUnits) ? s.halfUnits : (hit.halfUnits ? String(hit.halfUnits) : (s.halfUnits || '')),
         };
       }),
     }));
@@ -2441,6 +2571,15 @@ function App() {
   // 候補 → 明細へ反映（写真だけのカードに順に割り当て、余りは新規カード）
   const applyCandidates = () => {
     const chosen = pdfCands.items.filter(c => c.checked);
+    // 半月の単位数：当月（半月分）・翌月（月額）の両方が取れた「半月」の行だけ。
+    // 料金区分の列が読めない様式（Excelの列ずれ等）もあるので、区分が空なら「当月＜翌月」でも半月とみなす
+    // （日割は廃止済みで、当月が翌月より少ないのは半月のときだけ）。
+    // 月額の行は半月の単位数が報告書に無いので空のまま（推測で半分にはしない）。
+    const halfOf = (c) => {
+      const m1 = toInt(c.m1Units), m2 = toInt(c.m2Units);
+      const isHalf = c.rate === '半月' || (c.rate !== '月額' && m1 < m2);
+      return (isHalf && m1 && m2) ? String(m1) : '';
+    };
     if (!chosen.length) { showToast('追加する行を選択してください', 'error'); return; }
     setReport(r => {
       const sets = [...r.sets];
@@ -2456,6 +2595,8 @@ function App() {
             item: c.item || sets[i].item,
             category: c.category || sets[i].category,
             units: toInt(sets[i].units) ? sets[i].units : (c.units ? String(c.units) : sets[i].units),
+            halfUnits: toInt(sets[i].halfUnits) ? sets[i].halfUnits : halfOf(c),
+            outsideIns: !!c.outsideIns,
           };
         }
       }
@@ -2465,11 +2606,13 @@ function App() {
           ...emptySet(), productName: c.productName, tais: c.tais || '',
           item: c.item || '', category: c.category || CATEGORY_RENTAL,
           units: c.units ? String(c.units) : '',
+          halfUnits: halfOf(c),
+          outsideIns: !!c.outsideIns,
         });
       }
       return { ...r, updatedAt: Date.now(), sets };
     });
-    setMaster(m => upsertMaster(m, chosen.map(c => ({ productName: c.productName, tais: c.tais, item: c.item, category: c.category, units: c.units }))));
+    setMaster(m => upsertMaster(m, chosen.map(c => ({ productName: c.productName, tais: c.tais, item: c.item, category: c.category, units: c.units, halfUnits: halfOf(c) }))));
     setPdfCands(null);
     setPendingDoc(null); // 反映完了後は「テキストを抽出できませんでした」バナーを出さない
     showToast(`${chosen.length}件を明細に反映しました`);
@@ -2499,6 +2642,7 @@ function App() {
         productName: m.name, tais: m.tais || '',
         item: m.item || '', category: m.category || CATEGORY_RENTAL,
         units: m.units ? String(m.units) : '',
+        halfUnits: m.halfUnits ? String(m.halfUnits) : '',
       }))],
     }));
     setMasterPick(null);
@@ -2620,7 +2764,8 @@ function App() {
             maker: sanStr(raw && raw.maker, 60),
             category: CATEGORIES.includes(raw && raw.category) ? raw.category : '',
             item: sanStr(raw && raw.item, 60),
-            units: toInt(raw && raw.units), updatedAt: toInt(raw && raw.updatedAt),
+            units: toInt(raw && raw.units), halfUnits: toInt(raw && raw.halfUnits),
+            updatedAt: toInt(raw && raw.updatedAt),
           };
           if (!m.name) continue;
           const cur = map.get(m.name);
@@ -3183,6 +3328,13 @@ function App() {
                 checked={!!report.highlightDelivered}
                 onChange={e => updateReport({ highlightDelivered: e.target.checked })} />
               一覧表で納品分に色を付ける
+            </label>
+            <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${report.sets.length ? 'text-slate-700' : 'text-slate-300'}`}
+              title="1枚目の明細の下に、全部の用具の TAIS・単位数（月額・半月）と合計を表で付けます">
+              <input type="checkbox" className="w-4 h-4 accent-blue-600" disabled={!report.sets.length}
+                checked={report.showUnitSummary !== false}
+                onChange={e => updateReport({ showUnitSummary: e.target.checked })} />
+              明細の下に単位数・TAISのまとめを付ける
             </label>
             {/* 明細の追加手段はここに並べる（チェック欄の横） */}
             <div className="flex gap-2 ml-auto">
