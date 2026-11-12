@@ -61,6 +61,8 @@ import { unzipSync, strFromU8 } from 'fflate';
 import Anthropic from '@anthropic-ai/sdk';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+// 特定福祉用具のカタログ（申請書アプリの部品をそのまま使う。src/catalogBridge.tsx・src/tokutei-catalog/）
+import { TokuteiCatalogDialog } from '../src/catalogBridge.tsx';
 
 // pdf.js: worker を同一バンドルに同梱し fake worker で動かす（外部ファイル・CDN不要）
 if (typeof window !== 'undefined') window.pdfjsWorker = pdfjsWorker;
@@ -124,16 +126,19 @@ const RENTAL_ITEMS = [
 ];
 // 特定福祉用具（販売）の品目。実務でよく使う細分類まで選べるようにする。
 // 「入浴補助用具」「腰掛便座」は制度上の大分類だが、営業現場では具体名で管理するため展開する。
-const BATH_AID_ITEMS = ['シャワーチェア', '浴槽手すり', '浴槽台', 'バスボード', 'シャワーキャリー'];
-const TOILET_SEAT_ITEMS = ['ポータブルトイレ', '補高便座'];
+const BATH_AID_ITEMS = ['シャワーチェア', '浴槽手すり', '浴槽台', 'バスボード', 'シャワーキャリー', '入浴用介助ベルト'];
+const TOILET_SEAT_ITEMS = ['ポータブルトイレ', '補高便座', '据置式便座', '昇降便座'];
+// 2024年4月からの選択制（貸与か購入を選べる）：固定用スロープ・歩行器（歩行車を除く）・多点杖。介援隊カタログ（申請書アプリと同じ）にも載っている
+const SELECTABLE_ITEMS = ['多点杖', '歩行器', '固定用スロープ'];
 const SPECIFIC_OTHER_ITEMS = [
   '自動排泄処理装置の交換可能部品', '簡易浴槽', '移動用リフトのつり具の部分', '排泄予測支援機器',
 ];
-const SPECIFIC_ITEMS = [...TOILET_SEAT_ITEMS, ...BATH_AID_ITEMS, ...SPECIFIC_OTHER_ITEMS];
+const SPECIFIC_ITEMS = [...TOILET_SEAT_ITEMS, ...BATH_AID_ITEMS, ...SELECTABLE_ITEMS, ...SPECIFIC_OTHER_ITEMS];
 // 品目セレクトのグループ（特定福祉用具用）
 const SPECIFIC_ITEM_GROUPS = [
   { label: '入浴補助用具', items: BATH_AID_ITEMS },
   { label: '腰掛便座', items: TOILET_SEAT_ITEMS },
+  { label: '選択制（歩行器・つえ・スロープ）', items: SELECTABLE_ITEMS },
   { label: 'その他', items: SPECIFIC_OTHER_ITEMS },
 ];
 const CATEGORY_RENTAL = '福祉用具貸与';
@@ -767,6 +772,7 @@ function parseRowsAsUnitReport(rows) {
     const m2 = taniCols.length > 1 ? resolvedNumericCell(rows, r, taniCols[1]) : 0;
     const isSale = norm && norm.category === CATEGORY_SPECIFIC;
     const units = isSale ? toInt(at(r, cPrice)) : (m2 || m1);
+    const monthlyPrice = isSale ? 0 : toInt(at(r, cPrice)); // 月額料金（円）。保険外の報告書で単位数を料金から出すのに使う
 
     const key = `${productName}|${tais}`;
     if (seen.has(key)) continue;
@@ -775,7 +781,7 @@ function parseRowsAsUnitReport(rows) {
       productName: productName.slice(0, 60), maker: '', tais, units,
       m1Units: m1, m2Units: m2, rate,
       item: norm ? norm.item : '', category: norm ? norm.category : CATEGORY_RENTAL, kubun,
-      outsideIns,
+      outsideIns, monthlyPrice,
     });
   }
 
@@ -1092,6 +1098,10 @@ function parseRentalUnitReport(spans) {
     const m2 = tailNums.length >= 5 ? tailNums[4] : 0;   // 翌月分
     const units = outsideIns ? (m2 || m1) : (m2 || m1 || (allNums.length ? allNums[allNums.length - 1] : 0));
     const kubun = (km ? km[1] : '').replace('引き取り', '引取').replace('解約済', '解約');
+    // 月額料金（円）：料金区分（半月／月額）の手前の最後の数（〔区分 数量 月額料金〕の月額料金）。
+    // 単位数の欄が「保険外」の報告書で、単位数を料金から出すのに使う（applyExtraction・applyCandidates）
+    const preNums = ((rateM ? dataText.slice(0, rateM.index) : '').match(/\d[\d,]*/g) || []).map(toInt);
+    const monthlyPrice = preNums.length >= 2 ? preNums[preNums.length - 1] : 0;
 
     cands.push({
       productName: productName.slice(0, 60),
@@ -1103,6 +1113,7 @@ function parseRentalUnitReport(spans) {
       category: norm.category,
       kubun,
       outsideIns,                      // 保険外の行（単位数一覧には載せない）
+      monthlyPrice,                    // 月額料金（円）
     });
   }
   return { cands, months };
@@ -1356,6 +1367,7 @@ function upsertMaster(master, sets) {
     const entry = {
       name,
       tais: s.tais || '',
+      maker: s.maker || '',
       category: s.category || '',
       item: s.item || '',
       units: toInt(s.units),
@@ -1368,6 +1380,7 @@ function upsertMaster(master, sets) {
       next[idx] = {
         ...entry,
         tais: entry.tais || old.tais,
+        maker: entry.maker || old.maker || '',
         category: entry.category || old.category,
         item: entry.item || old.item,
         units: entry.units || old.units,
@@ -1418,6 +1431,10 @@ const reportSummary = (report) => {
   const sales = report.sets.filter(s => s.category === CATEGORY_SPECIFIC).reduce((sum, s) => sum + amt(s), 0);
   return { rental, specific, units, sales };
 };
+
+// 福祉用具貸与の料金（円）→ 単位数（1単位＝10円。端数は四捨五入）。半月は月額料金の半分（SMARTの様式：2,260円→半月1,130円）
+const priceToUnits = (yen) => Math.round(toInt(yen) / 10);
+const priceToHalfUnits = (yen) => Math.round(toInt(yen) / 20);
 
 // 帳票カードの品目の右に出す貸与の単位数（例「月額 226単位／半月 113単位」）。保険外は「保険外」
 const setUnitsLabel = (s) => {
@@ -1492,7 +1509,10 @@ function buildPrintHTML(report, photoMap) {
   const lastIdx = pages.length - 1;
   const lastRowsMm = Math.ceil(pages[lastIdx].length / 2) * ROW_MM;
   const lastAvail = lastIdx === 0 ? page1Avail : 272 - 12; // 2枚目以降は見出し1行
-  const summaryOnLast = useSummary && lastRowsMm + summaryMm <= lastAvail;
+  // 1枚目に写真が4枚（2段）入るときは、まとめは2枚目へ（ユーザーの指示「写真が４枚になるときは、２枚目にいってよい」2026-11-12。
+  // 詰めると1枚目が窮屈になる）。2枚目以降も、ページが写真でいっぱい（6枚）なら次のページへ
+  const lastFull = pages[lastIdx].length >= (lastIdx === 0 ? 4 : 6);
+  const summaryOnLast = useSummary && !lastFull && lastRowsMm + summaryMm <= lastAvail;
   const summaryOwnPage = useSummary && !summaryOnLast;
 
   const headerFirst = `
@@ -1918,7 +1938,7 @@ function ItemCombo({ value, isSale, onChange }) {
 // ===== 明細カード =====
 // React.memo: 利用者名や報告事項の入力中に全カード（写真img込み）が
 // 再レンダーされるのを防ぐ。propsのコールバックは親側で参照安定化済み。
-const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch, onDropFiles, onPastePhoto }) {
+const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove, onRecognize, onAttach, onMasterMatch, onDropFiles, onPastePhoto, onOpenCatalog }) {
   const isSale = s.category === CATEGORY_SPECIFIC; // 販売品は単位数ではなく価格(円)
   const [over, setOver] = useState(false);
   // このカードに直接ドロップされた写真は、このカードに添付する
@@ -1980,11 +2000,19 @@ const SetCard = React.memo(function SetCard({ s, idx, photo, onUpdate, onRemove,
         </div>
 
         <div className="flex-1 min-w-0 space-y-1.5">
-          <div>
+          <div className="flex gap-1.5">
             <input className={inputCls} list="master-list" value={s.productName} placeholder="商品名（入力するとマスタから補完）"
               onChange={e => onUpdate(s.id, { productName: e.target.value })}
               onBlur={e => e.target.value && onMasterMatch(s.id, e.target.value)} />
+            {/* 特定福祉用具は申請書アプリと同じカタログから選べる（商品名・メーカー・TAIS・品目・価格が入る） */}
+            {isSale && onOpenCatalog && (
+              <button className="shrink-0 h-9 px-2 rounded-md border border-sky-300 bg-sky-50 text-sky-900 text-xs font-bold hover:bg-sky-100 whitespace-nowrap"
+                title="申請書アプリと同じ介援隊カタログから商品を選びます" onClick={() => onOpenCatalog('set', s.id)}>
+                📖 カタログ
+              </button>
+            )}
           </div>
+          {isSale && s.maker && <div className="text-[11px] text-slate-500 -mt-1 truncate">メーカー：{s.maker}</div>}
           <select className={inputCls} value={s.place}
             onChange={e => onUpdate(s.id, { place: e.target.value })}>
             <option value="">納品箇所（任意）</option>
@@ -2049,6 +2077,8 @@ function App() {
   const [master, setMaster] = useState(() => cleanMaster(loadStorage(STORAGE_KEYS.MASTER, [])).list);
   const [masterPick, setMasterPick] = useState(null); // マスタから選ぶダイアログの選択状態
   const [masterOpen, setMasterOpen] = useState(false); // メイン画面の商品マスタ開閉
+  // 特定福祉用具のカタログの窓：mode=new（明細を足す）／set（その明細に入れる）／master（商品マスタに登録）
+  const [catalogPick, setCatalogPick] = useState(null);
   const [drafts, setDrafts] = useState(() => loadStorage(STORAGE_KEYS.DRAFTS, {}));
   const [report, setReport] = useState(null);
   const [photoCache, setPhotoCache] = useState({});
@@ -2434,12 +2464,18 @@ function App() {
 
   // ---- レンタル単位数報告書（PDF）取込 ----
   // 抽出結果を候補ダイアログに載せ、ヘッダー情報（利用者名等）と全行を報告書へ反映
-  const applyExtraction = (cands, header, kind, sourceName, months = []) => {
+  const applyExtraction = (rawCands, header, kind, sourceName, months = []) => {
     // 保険外の行: 商品名・TAISは明細カード用の候補に出すが、単位数の一覧表（2枚目）には載せない。
-    // 保険内の行と混在する場合は既定OFF（従来どおり保険外は除外）。
-    // 全行が保険外（認定申請中など）の場合は、納品の行を既定ONにして取り込めるようにする。
-    const outside = cands.filter(c => c.outsideIns).length;
-    const allOutside = cands.length > 0 && outside === cands.length;
+    // 保険内の行と混在する場合は既定OFF（従来どおり保険外は除外。自費の用具とみなす）。
+    // 全行が保険外（認定申請中で保険者番号が未登録など）の場合は、納品の行を既定ONにし、
+    // 単位数は月額料金から出す（料金÷10。例 2,260円→226単位）。ユーザーの指摘「単位数が取り込めていません」2026-11-12
+    const outside = rawCands.filter(c => c.outsideIns).length;
+    const allOutside = rawCands.length > 0 && outside === rawCands.length;
+    const cands = allOutside
+      ? rawCands.map(c => (c.monthlyPrice && c.category !== CATEGORY_SPECIFIC
+        ? { ...c, units: priceToUnits(c.monthlyPrice), unitsFromPrice: true }
+        : c))
+      : rawCands;
     const isDefaultOn = (c) => c.kubun === '納品' && (!c.outsideIns || allOutside);
     const delivered = cands.filter(isDefaultOn).length;
     if (cands.length) {
@@ -2453,6 +2489,7 @@ function App() {
         })),
       });
     }
+    const fromPrice = cands.filter(c => c.unitsFromPrice).length;
     // 単位数報告書なら、全行と取込元を保存（2枚目の一覧表用）
     if (kind === '単位数報告書') {
       setReport(r => ({
@@ -2483,7 +2520,9 @@ function App() {
     }
     const labels = { clientName: '利用者名', cmOffice: '居宅', careManager: 'ケアマネ', staff: '担当者' };
     const headMsg = filled.length ? `／${filled.map(k => labels[k]).join('・')}も取り込みました` : '';
-    const outMsg = outside ? `／保険外${outside}件は単位数一覧に載せません` : '';
+    const outMsg = fromPrice
+      ? `／単位数の欄が保険外のため、${fromPrice}件の単位数を月額料金から出しました（料金÷10）`
+      : (outside ? `／保険外${outside}件は単位数一覧に載せません` : '');
     if (kind === '単位数報告書' && !cands.length) {
       showToast(filled.length
         ? `${filled.map(k => labels[k]).join('・')}を取り込みました。商品の行は読み取れなかったため、明細は手入力してください`
@@ -2575,15 +2614,35 @@ function App() {
     // 料金区分の列が読めない様式（Excelの列ずれ等）もあるので、区分が空なら「当月＜翌月」でも半月とみなす
     // （日割は廃止済みで、当月が翌月より少ないのは半月のときだけ）。
     // 月額の行は半月の単位数が報告書に無いので空のまま（推測で半分にはしない）。
+    // 報告書に半月の単位数が無い行（月額の行・保険外の行）は、月額料金の半分から出す（SMARTの半月料金＝月額料金÷2）。
+    // ユーザーの指示「手すりの横に単位数を月額、半月の単位数を表示」2026-11-12
     const halfOf = (c) => {
+      if (c.outsideIns && !c.unitsFromPrice) return ''; // 自費（保険外）の用具は単位数なし
       const m1 = toInt(c.m1Units), m2 = toInt(c.m2Units);
       const isHalf = c.rate === '半月' || (c.rate !== '月額' && m1 < m2);
-      return (isHalf && m1 && m2) ? String(m1) : '';
+      if (isHalf && m1 && m2) return String(m1);
+      return c.monthlyPrice && c.category !== CATEGORY_SPECIFIC ? String(priceToHalfUnits(c.monthlyPrice)) : '';
     };
+    const isOutside = (c) => !!c.outsideIns && !c.unitsFromPrice;
     if (!chosen.length) { showToast('追加する行を選択してください', 'error'); return; }
     setReport(r => {
       const sets = [...r.sets];
-      const queue = [...chosen];
+      // 0) 同じ商品（TAIS か商品名が同じ）の明細がもうあれば、そこに入れる（取り込み直しで単位数だけ足す。写真・納品箇所はそのまま）。
+      //    入力済みの単位数は上書きしない
+      const queue = [];
+      for (const c of chosen) {
+        const k = sets.findIndex(x => (c.tais && x.tais === c.tais) || (x.productName || '').trim() === (c.productName || '').trim());
+        if (k < 0) { queue.push(c); continue; }
+        const x = sets[k];
+        sets[k] = {
+          ...x,
+          tais: x.tais || c.tais || '',
+          item: x.item || c.item || '',
+          units: toInt(x.units) ? x.units : (c.units ? String(c.units) : (x.units || '')),
+          halfUnits: toInt(x.halfUnits) ? x.halfUnits : halfOf(c),
+          outsideIns: toInt(x.units) ? !!x.outsideIns : isOutside(c),
+        };
+      }
       // 1) 商品名が空のカード（写真だけ添付済み）に順に割り当て
       for (let i = 0; i < sets.length && queue.length; i++) {
         if (!sets[i].productName) {
@@ -2596,7 +2655,7 @@ function App() {
             category: c.category || sets[i].category,
             units: toInt(sets[i].units) ? sets[i].units : (c.units ? String(c.units) : sets[i].units),
             halfUnits: toInt(sets[i].halfUnits) ? sets[i].halfUnits : halfOf(c),
-            outsideIns: !!c.outsideIns,
+            outsideIns: isOutside(c),
           };
         }
       }
@@ -2607,7 +2666,7 @@ function App() {
           item: c.item || '', category: c.category || CATEGORY_RENTAL,
           units: c.units ? String(c.units) : '',
           halfUnits: halfOf(c),
-          outsideIns: !!c.outsideIns,
+          outsideIns: isOutside(c),
         });
       }
       return { ...r, updatedAt: Date.now(), sets };
@@ -2627,6 +2686,32 @@ function App() {
     showToast('特定福祉用具の明細を追加しました。品目を選んでください');
   };
 
+  // ---- 特定福祉用具のカタログ（申請書アプリと同じカタログ・同じ選び方。src/catalogBridge.tsx） ----
+  const openCatalog = useCallback((mode, setId = null) => setCatalogPick({ mode, setId }), []);
+  const applyCatalog = (res, { alsoMaster }) => {
+    const fields = {
+      productName: res.productName, maker: res.maker, tais: res.tais,
+      category: CATEGORY_SPECIFIC, item: res.item,
+      units: res.units ? String(res.units) : '',
+      halfUnits: '', outsideIns: false,
+    };
+    if (catalogPick.mode !== 'master') {
+      setReport(r => ({
+        ...r, updatedAt: Date.now(),
+        sets: catalogPick.mode === 'set' && r.sets.some(s => s.id === catalogPick.setId)
+          ? r.sets.map(s => (s.id === catalogPick.setId ? { ...s, ...fields } : s))
+          : [...r.sets, { ...emptySet(), ...fields }],
+      }));
+    }
+    if (alsoMaster) setMaster(m => upsertMaster(m, [fields]));
+    const where = catalogPick.mode === 'master' ? '商品マスタに登録しました' : `明細に入れました${alsoMaster ? '（商品マスタにも登録）' : ''}`;
+    showToast(`${where}：${res.productName}`);
+    setCatalogPick(null);
+  };
+  const catalogMakers = useMemo(
+    () => [...new Set(master.map(m => (m.maker || '').trim()).filter(Boolean))],
+    [master]);
+
   // ---- 商品マスタから選んで報告書へ一括追加 ----
   const openMasterPick = () => {
     if (!master.length) { showToast('商品マスタにまだ商品がありません。保存やPDF取込で貯まります'); return; }
@@ -2639,7 +2724,7 @@ function App() {
       ...r, updatedAt: Date.now(),
       sets: [...r.sets, ...chosen.map(m => ({
         ...emptySet(),
-        productName: m.name, tais: m.tais || '',
+        productName: m.name, tais: m.tais || '', maker: m.maker || '',
         item: m.item || '', category: m.category || CATEGORY_RENTAL,
         units: m.units ? String(m.units) : '',
         halfUnits: m.halfUnits ? String(m.halfUnits) : '',
@@ -2868,7 +2953,10 @@ function App() {
             <div className="flex items-center mb-2">
               <p className="text-xs text-slate-500 flex-1">
                 覚えるのは<b>商品名</b>だけです。保存やPDF取込のたびに自動で貯まり、報告書作成時に「マスタから選ぶ」で呼び出せます。
+                特定福祉用具は、申請書アプリと同じ<b>介援隊カタログ</b>から選んで登録できます。
               </p>
+              <button className="shrink-0 ml-2 inline-flex items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2.5 py-1.5 text-xs font-bold text-sky-900 hover:bg-sky-100"
+                onClick={() => openCatalog('master')}>📖 カタログから登録</button>
               {master.length > 0 && (
                 <button className="text-[11px] text-slate-400 hover:text-rose-600 shrink-0 ml-2"
                   onClick={() => { if (confirm(`商品マスタを全部削除しますか？（${master.length}件）`)) setMaster([]); }}>すべて削除</button>
@@ -3344,8 +3432,8 @@ function App() {
                 <BookOpen size={14} /> マスタから選ぶ
               </button>
               <button className="inline-flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-md shadow-sm text-xs font-bold transition"
-                title="入浴補助用具・腰掛便座など、単位数報告書に載らない販売品を追加します"
-                onClick={addSpecificItem}>
+                title="入浴補助用具・腰掛便座など、単位数報告書に載らない販売品を、申請書アプリと同じカタログから選んで追加します"
+                onClick={() => openCatalog('new')}>
                 <PackagePlus size={14} /> 特定福祉用具
               </button>
             </div>
@@ -3381,6 +3469,7 @@ function App() {
               onMasterMatch={onMasterMatchStable}
               onDropFiles={onDropFilesStable}
               onPastePhoto={onPastePhotoStable}
+              onOpenCatalog={openCatalog}
             />
           ))}
 
@@ -3483,15 +3572,17 @@ function App() {
                   )}
                   {c.outsideIns && (
                     <span className="text-[10px] font-bold rounded px-1.5 py-0.5 shrink-0 bg-amber-100 text-amber-700"
-                      title="単位数の欄が「保険外」の行です。明細カードには追加できますが、単位数の一覧表には載りません">保険外</span>
+                      title={c.unitsFromPrice
+                        ? '単位数の欄が「保険外」のため、単位数を月額料金から出しました（料金÷10）。単位数の一覧表には載りません'
+                        : '単位数の欄が「保険外」の行です。明細カードには追加できますが、単位数の一覧表には載りません'}>保険外</span>
                   )}
                   <span className="text-sm text-slate-800 truncate font-bold">{c.productName}</span>
                 </div>
                 {c.item && <div className="text-[11px] text-slate-500 truncate">{c.category === CATEGORY_PREVENTION ? '予防・' : c.category === CATEGORY_SPECIFIC ? '特定・' : ''}{c.item}</div>}
               </div>
               <span className="text-xs text-slate-500 tabular-nums shrink-0">{c.tais || 'TAIS未検出'}</span>
-              <span className="text-xs text-slate-600 tabular-nums w-20 text-right shrink-0">
-                {c.units ? (c.category === CATEGORY_SPECIFIC ? `¥${c.units.toLocaleString()}` : `${c.units.toLocaleString()}単位`) : (c.outsideIns ? '保険外' : '―')}
+              <span className="text-xs text-slate-600 tabular-nums w-28 text-right shrink-0">
+                {c.units ? (c.category === CATEGORY_SPECIFIC ? `¥${c.units.toLocaleString()}` : `${c.units.toLocaleString()}単位${c.unitsFromPrice ? '（料金から）' : ''}`) : (c.outsideIns ? '保険外' : '―')}
               </span>
             </label>
           ))}
@@ -3655,6 +3746,26 @@ function App() {
       {view === 'edit' && report && renderEdit()}
       {pdfCands && renderPdfCands()}
       {masterPick && renderMasterPick()}
+      {catalogPick && (() => {
+        const target = catalogPick.mode === 'set' && report ? report.sets.find(x => x.id === catalogPick.setId) : null;
+        return (
+          <TokuteiCatalogDialog
+            mode={catalogPick.mode === 'master' ? 'master' : 'report'}
+            initial={target ? { item: target.item, productName: target.productName, maker: target.maker, tais: target.tais } : undefined}
+            discountRate={Number.isFinite(Number(settings.tokuteiDiscount)) ? Number(settings.tokuteiDiscount) : 20}
+            priceTax={settings.tokuteiPriceTax === '税抜' ? '税抜' : '税込'}
+            makerChoices={catalogMakers}
+            onSettings={(patch) => setSettings(st => ({
+              ...st,
+              ...(patch.discountRate !== undefined ? { tokuteiDiscount: patch.discountRate } : {}),
+              ...(patch.priceTax ? { tokuteiPriceTax: patch.priceTax } : {}),
+            }))}
+            onApply={applyCatalog}
+            onManual={catalogPick.mode === 'new' ? () => { setCatalogPick(null); addSpecificItem(); } : undefined}
+            onClose={() => setCatalogPick(null)}
+          />
+        );
+      })()}
       {printOpen && renderPrintOverlay()}
       <BusyOverlay busy={busy} />
       <Toast toast={toast} />

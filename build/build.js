@@ -24,6 +24,16 @@ const DST = process.argv[3] || path.join(__dirname, '..', 'index.html');
   const jsx = m[2];
   console.log(`JSX size: ${jsx.length} bytes`);
 
+  // 特定福祉用具のカタログ（申請書アプリの部品の写し src/tokutei-catalog/）は pdf.js を
+  // 'pdfjs-dist/legacy/build/pdf.min.mjs' で読むので、本体と同じ pdf.mjs に寄せる（2つ同梱しない）
+  const samePdfjs = {
+    name: 'same-pdfjs',
+    setup(b) {
+      b.onResolve({ filter: /^pdfjs-dist\/legacy\/build\/pdf\.min\.mjs$/ }, (args) =>
+        b.resolve('pdfjs-dist/legacy/build/pdf.mjs', { resolveDir: args.resolveDir, kind: args.kind }));
+    },
+  };
+
   // esbuild で JSX をバンドル（react/react-dom/firebase/lucide-react を node_modules から解決し全て同梱）
   const result = await esbuild.build({
     stdin: {
@@ -40,11 +50,16 @@ const DST = process.argv[3] || path.join(__dirname, '..', 'index.html');
     // 古めのブラウザ(?. や ?? 未対応のEdge/Safari等)でも構文エラーで落ちないよう
     // es2017 まで下げてビルドする（?. ?? オブジェクトスプレッド等を互換コードに変換）。
     target: 'es2017',
-    jsx: 'transform',
+    // 申請書アプリの部品（TSX）は React の自動の JSX（react/jsx-runtime）で書かれているので、全体を automatic にする
+    jsx: 'automatic',
+    plugins: [samePdfjs],
+    // src/tokutei-catalog/ の node_modules は無いので、このフォルダの node_modules から解決する
+    nodePaths: [path.join(__dirname, 'node_modules')],
     minify: true,
     legalComments: 'none',
     write: false,
-    define: { 'process.env.NODE_ENV': '"production"' },
+    // __APP_BUILD__：申請書アプリのカタログの版（text.json・ページの絵の ?v=）。ポータルの tokutei/version.json から読む（src/catalogBridge.tsx）
+    define: { 'process.env.NODE_ENV': '"production"', '__APP_BUILD__': 'globalThis.__TOKUTEI_BUILD__' },
     logLevel: 'warning',
   });
   const code = result.outputFiles[0].text;
